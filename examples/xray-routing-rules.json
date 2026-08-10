@@ -1,0 +1,16 @@
+[
+  {
+    "type": "field",
+    "domain": ["geosite:google"],
+    "network": "tcp",
+    "outboundTag": "warp-google",
+    "ruleTag": "Google via WARP"
+  },
+  {
+    "type": "field",
+    "domain": ["geosite:google"],
+    "network": "udp",
+    "outboundTag": "blocked",
+    "ruleTag": "Block Google QUIC leak"
+  }
+]
