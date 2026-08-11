@@ -27,6 +27,10 @@ grep -Fq 'R2_BUCKET: warp-3xui-private' "${repo_dir}/.github/workflows/publish-r
 grep -Fq 'public/install.sh' "${repo_dir}/.github/workflows/publish-r2.yml"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${script}"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${bootstrap}"
+grep -Fq 'PROJECT_ID="warp-3xui-safe"' "${script}"
+grep -Fq '/usr/local/sbin/warpm' "${script}"
+grep -Fq 'run_via_warp' "${script}"
+grep -Fq 'curl_via_warp' "${script}"
 grep -Fq "printf 'EGRESS_MODE=%s" "${script}"
 # Verify that the literal template placeholder is present.
 # shellcheck disable=SC2016
@@ -40,7 +44,7 @@ if (( EUID != 0 )); then
     menu_runner=(sudo -n bash "${script}")
 fi
 menu_output="$(printf '10\n\n0\n' | "${menu_runner[@]}" 2>&1)"
-[[ "$(grep -c 'WARP for 3x-ui v' <<<"${menu_output}")" -eq 2 ]]
+[[ "$(grep -c 'WARP Safe Manager v' <<<"${menu_output}")" -eq 2 ]]
 grep -q '无效选项，请重新输入' <<<"${menu_output}"
 
 if grep -Eq 'ip( -[46])? route (add|replace).*default.*(WARP|wgcf)' "${script}"; then
