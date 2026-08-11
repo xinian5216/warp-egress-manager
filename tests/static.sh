@@ -7,6 +7,7 @@ bootstrap="${repo_dir}/cloudflare-install.sh"
 
 bash -n "${script}"
 bash -n "${bootstrap}"
+bash -n "${repo_dir}/tests/modes.sh"
 [[ "$(bash "${script}" version)" == "$(<"${repo_dir}/VERSION")" ]]
 bash "${script}" --help | grep -q 'Local Proxy'
 
@@ -26,12 +27,19 @@ grep -Fq 'R2_BUCKET: warp-3xui-private' "${repo_dir}/.github/workflows/publish-r
 grep -Fq 'public/install.sh' "${repo_dir}/.github/workflows/publish-r2.yml"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${script}"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${bootstrap}"
+grep -Fq "printf 'EGRESS_MODE=%s" "${script}"
+# Verify that the literal template placeholder is present.
+# shellcheck disable=SC2016
+grep -Fq '"targetStrategy": "${strategy}"' "${script}"
+grep -Fq 'ForceIPv4' "${script}"
+grep -Fq 'ForceIPv6' "${script}"
+grep -Fq 'set-egress' "${script}"
 
 menu_runner=(bash "${script}")
 if (( EUID != 0 )); then
     menu_runner=(sudo -n bash "${script}")
 fi
-menu_output="$(printf '9\n\n0\n' | "${menu_runner[@]}" 2>&1)"
+menu_output="$(printf '10\n\n0\n' | "${menu_runner[@]}" 2>&1)"
 [[ "$(grep -c 'WARP for 3x-ui v' <<<"${menu_output}")" -eq 2 ]]
 grep -q '无效选项，请重新输入' <<<"${menu_output}"
 
