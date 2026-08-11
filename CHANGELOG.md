@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 - 2026-08-11
+
+- 新增 `auto`、`ipv4`、`ipv6`、`dual` 四种可选 WARP 出口模式，单栈自动补齐缺失地址族。
+- 为 Xray 生成 `warp-ipv4`、`warp-ipv6`、`warp-auto` 出站，使用 `targetStrategy` 严格控制目标地址族。
+- IPv4 与 IPv6 WARP 出口分别验证；双栈模式要求两族都通过，仍禁止 WARP 接管系统默认路由。
+- 新增 `warp3xui set-egress MODE` 和菜单入口，无需重装即可切换模式并重生成 3x-ui 示例。
+- IPv6-only 安装前检查 Cloudflare 官方软件源，无法自举时给出 NAT64、临时代理或离线包提示。
+- 补充恢复原生 3x-ui 出口的方法，明确脚本不会修改 3x-ui 数据库或 VPS 网卡地址。
+
 ## 1.1.1 - 2026-08-10
 
 - 将下载链路从 `xray-manager` 拆分为专用 Worker `warp-3xui-download` 和专用 R2 桶 `warp-3xui-private`。
