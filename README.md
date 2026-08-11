@@ -1,4 +1,4 @@
-# WARP Safe Manager（安全 Local Proxy 版）
+# WARP Egress Manager（安全、可选出口的 Local Proxy 管理器）
 
 为 IPv4-only、IPv6-only、双栈 VPS 安装和管理 Cloudflare 官方 WARP 客户端，并只在本机
 `127.0.0.1:40000` 提供 SOCKS5 出站。它可以直接给 `curl`、支持 `ALL_PROXY` 的程序或
@@ -49,14 +49,15 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 
 ### 方式一：Cloudflare Worker + 私有 R2（纯 IPv6 首选）
 
-本项目使用独立的 Worker `warp-3xui-download` 与私有 R2 桶
-`warp-3xui-private`，不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，
-IPv4、双栈和没有 NAT64 的 IPv6-only VPS 都可以使用：
+项目业务名称已经改为 **WARP Egress Manager**。现有 Worker `warp-3xui-download` 与私有
+R2 桶 `warp-3xui-private` 暂时保留原基础设施名称，避免破坏已经部署的入口、密钥和绑定；
+它们不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，IPv4、双栈和没有
+NAT64 的 IPv6-only VPS 都可以使用：
 
 ```bash
-curl -fsSLo /tmp/warp3xui-install.sh \
+curl -fsSLo /tmp/warpm-install.sh \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh &&
-sudo bash /tmp/warp3xui-install.sh
+sudo bash /tmp/warpm-install.sh
 ```
 
 按提示输入本项目专用的 Cloudflare 安装密钥。引导脚本会：
@@ -67,10 +68,9 @@ sudo bash /tmp/warp3xui-install.sh
 4. 把主命令安装为 `/usr/local/sbin/warpm`，同时保留 `warp3xui` 兼容入口；
 5. 记录 Cloudflare 更新通道，以后从菜单更新时仍不依赖 GitHub。
 
-> 该入口解决的是“纯 IPv6 无法获取私有 GitHub 脚本”的第一步。WARP 尚未安装时不可能
-> 借 WARP 自己完成下载，所以系统软件源和 `pkg.cloudflareclient.com` 仍须通过原生 IPv6
-> 可达。脚本会先检查官方软件源；不可达时明确停止，需临时 NAT64/代理或离线上传官方包，
-> 不会偷偷启用全局 WARP。
+> WARP 尚未安装时不可能借 WARP 自己完成下载。脚本会先尝试 Cloudflare 官方软件源；
+> 如果 `pkg.cloudflareclient.com` 在当前 IPv6-only 网络不可达，会自动通过同一 Worker 从
+> 私有 R2 下载经过 SHA256 校验的 Cloudflare 官方 `.deb` 包。整个过程仍不会启用全局 WARP。
 
 ### 一次性配置 R2 自动发布
 
@@ -79,8 +79,21 @@ sudo bash /tmp/warp3xui-install.sh
 | R2 对象 | 用途 |
 |---|---|
 | `public/install.sh` | 公开引导脚本 |
-| `releases/warp3xui/warp-3xui.sh` | 需要 Bearer 密钥的主脚本 |
-| `releases/warp3xui/warp-3xui.sha256` | 需要 Bearer 密钥的校验值 |
+| `releases/warpm/warpm.sh` | 需要 Bearer 密钥的主脚本 |
+| `releases/warpm/warpm.sha256` | 需要 Bearer 密钥的校验值 |
+| `releases/warp3xui/*` | 旧版安装器兼容副本 |
+
+`.github/workflows/sync-warp-packages.yml` 每周一自动读取 Cloudflare 官方 APT 索引，下载并
+核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04/26.04 的 amd64 包写入：
+
+```text
+packages/cloudflare-warp/deb/<codename>/amd64/latest/
+packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/
+```
+
+`latest` 供脚本自动兜底，`archive` 保留具体版本以便回退。也可以在 GitHub Actions 中手动
+运行 **Sync official WARP packages to R2** 立即同步。R2 包兜底目前只覆盖 Debian/Ubuntu
+amd64；其他系统或架构仍走 Cloudflare 官方软件源。
 
 先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
 写入”权限的 R2 API Token。把新凭据配置到 `warp-3xui-safe` 仓库：
@@ -105,11 +118,13 @@ sudo bash /tmp/warp3xui-install.sh
 | R2 Binding | `BUNDLES` → `warp-3xui-private`（已写入配置） |
 
 为 Worker 添加一个独立 Secret：`INSTALL_TOKEN`。它就是用户运行引导脚本时输入的安装
-密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开：
+密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开安装引导；其他对象均要求
+Bearer Token：
 
 - `/install.sh`：公开引导脚本；
-- `/releases/warp3xui/warp-3xui.sh`：Bearer Token 保护；
-- `/releases/warp3xui/warp-3xui.sha256`：Bearer Token 保护。
+- `/releases/warpm/*`：管理脚本与校验值；
+- `/releases/warp3xui/*`：旧版兼容路径；
+- `/packages/cloudflare-warp/*`：定期同步的官方软件包、校验值和版本信息。
 
 配置并完成首次发布后检查：
 
@@ -118,7 +133,7 @@ curl -6I \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh
 ```
 
-不带密钥访问 `/releases/warp3xui/warp-3xui.sh` 返回 `401` 才是正常状态。
+不带密钥访问 `/releases/warpm/warpm.sh` 返回 `401` 才是正常状态。
 
 ### 方式二：私有 GitHub 安装
 
@@ -324,10 +339,12 @@ sudo warpm integrations
 sudo warpm uninstall
 ```
 
-直接运行 `sudo warpm` 会进入循环管理菜单。执行状态检查、重连、更新等操作后按
-Enter 返回主菜单，选择 `0` 才退出。
+直接运行 `sudo warpm`（root Shell 可直接输入 `warpm`）会进入循环管理菜单，可以安装、
+检查状态、切换 IPv4/IPv6 出口、查看代理用法、更新客户端或管理脚本以及卸载。每项操作
+完成后按 Enter 返回主菜单，选择 `0` 才退出。
 
-- `update-client`：通过 Cloudflare 官方 APT/YUM 仓库更新客户端，随后恢复 proxy 模式并验收。
+- `update-client`：优先通过 Cloudflare 官方 APT/YUM 仓库更新；官方源失败时在支持的平台
+  自动回退到 R2 镜像，随后恢复 proxy 模式并验收。
 - `set-egress`：只切换验收地址族并重生成 Xray 示例，不改默认路由、不重装客户端；3x-ui
   已导入的配置仍需按新 Tag 手动调整。
 - `self-update`：自动沿用首次安装来源；Cloudflare 通道额外校验 SHA256，随后执行
@@ -340,7 +357,8 @@ Enter 返回主菜单，选择 `0` 才退出。
 
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
-- 第三方客户端不打包进仓库，始终来自 Cloudflare 官方软件源；
+- WARP 客户端始终取自 Cloudflare 官方软件源；R2 只保存经官方索引 SHA256 验证的原包，
+  每周同步最新版并保留版本化归档；
 - GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 
@@ -350,8 +368,8 @@ Enter 返回主菜单，选择 `0` 才退出。
 2. `sudo warpm test --strict`
 3. `sudo journalctl -u warp-svc -n 100 --no-pager`
 4. MASQUE 不通时：重新安装选择 `auto` 或 `wireguard`
-5. IPv6-only 安装在 `pkg.cloudflareclient.com` 处停止：说明 GitHub 引导已解决，但官方包源
-   原生 IPv6 不可达；先提供 NAT64/临时代理或离线上传官方包
+5. IPv6-only 无法访问 `pkg.cloudflareclient.com`：正常情况下会自动回退 R2；若仍失败，
+   检查是否已经运行过包同步工作流、Worker Token、R2 Binding 和对应系统代号的对象
 6. WARP 正常但 Google 仍显示 CN：运行 `rotate` 尝试换出口；仍为 CN 时通常只能换 VPS
    机房/线路，WARP 本身不能选国家
 7. Google 规则不命中：确认入站 sniffing 已开启，规则在兜底规则之前，`geosite.dat` 足够新
