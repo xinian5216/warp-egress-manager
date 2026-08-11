@@ -29,7 +29,7 @@ CHECKSUM_FILE="${WORK_DIR}/warp-3xui.sha256"
 
 cleanup() {
     rm -rf "${WORK_DIR}"
-    unset INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
+    unset INSTALL_TOKEN WARPM_INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 chmod 700 "${WORK_DIR}"
@@ -42,7 +42,7 @@ chmod 700 "${WORK_DIR}"
 chmod 600 "${CURL_CONFIG}"
 unset INSTALL_TOKEN
 
-echo "正在通过 Cloudflare 下载 WARP for 3x-ui……"
+echo "正在通过 Cloudflare 下载 WARP Safe Manager……"
 curl --config "${CURL_CONFIG}" \
     "${BASE_URL}/releases/warp3xui/warp-3xui.sh" \
     -o "${SCRIPT_FILE}"
@@ -63,13 +63,13 @@ fi
     || { echo "安装脚本 SHA256 校验失败"; exit 1; }
 
 bash -n "${SCRIPT_FILE}"
-grep -q 'PROJECT_NAME="warp-3xui-safe"' "${SCRIPT_FILE}" \
-    || { echo "下载内容不是 WARP for 3x-ui 管理脚本"; exit 1; }
+grep -q 'PROJECT_ID="warp-3xui-safe"' "${SCRIPT_FILE}" \
+    || { echo "下载内容不是 WARP Safe Manager"; exit 1; }
 
 echo "校验通过，开始安装……"
-WARP3XUI_UPDATE_SOURCE=cloudflare \
-WARP3XUI_CLOUDFLARE_URL="${BASE_URL}" \
+WARPM_UPDATE_SOURCE=cloudflare \
+WARPM_CLOUDFLARE_URL="${BASE_URL}" \
 bash "${SCRIPT_FILE}" install "$@"
 
 echo
-echo "以后直接运行：sudo warp3xui"
+echo "以后直接运行：sudo warpm（旧命令 sudo warp3xui 仍兼容）"
