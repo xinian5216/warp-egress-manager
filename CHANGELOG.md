@@ -2,10 +2,13 @@
 
 ## 1.2.0 - 2026-08-11
 
+- 项目定位升级为通用 `WARP Safe Manager`；主命令改为 `warpm`，并保留 `warp3xui` 兼容入口。
+- 新增 `warpm env`、`warpm run -- COMMAND`、`warpm curl -4/-6`、`warpm proxy-info`，无需 3x-ui 即可直接使用本地 WARP。
+- 生成通用 `proxy.env` 与 `proxychains.conf`；3x-ui/Xray 改为可选集成。
 - 新增 `auto`、`ipv4`、`ipv6`、`dual` 四种可选 WARP 出口模式，单栈自动补齐缺失地址族。
 - 为 Xray 生成 `warp-ipv4`、`warp-ipv6`、`warp-auto` 出站，使用 `targetStrategy` 严格控制目标地址族。
 - IPv4 与 IPv6 WARP 出口分别验证；双栈模式要求两族都通过，仍禁止 WARP 接管系统默认路由。
-- 新增 `warp3xui set-egress MODE` 和菜单入口，无需重装即可切换模式并重生成 3x-ui 示例。
+- 新增 `warpm set-egress MODE` 和菜单入口，无需重装即可切换模式并重生成接入示例。
 - IPv6-only 安装前检查 Cloudflare 官方软件源，无法自举时给出 NAT64、临时代理或离线包提示。
 - 补充恢复原生 3x-ui 出口的方法，明确脚本不会修改 3x-ui 数据库或 VPS 网卡地址。
 
