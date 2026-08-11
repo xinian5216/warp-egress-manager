@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BASE_URL="${WARP3XUI_CLOUDFLARE_URL:-https://xray-manager-download.xinian5216.workers.dev}"
+BASE_URL="${WARP3XUI_CLOUDFLARE_URL:-https://warp-3xui-download.xinian5216.workers.dev}"
 BASE_URL="${BASE_URL%/}"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then

@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "warp-3xui-download",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-10",
+  "workers_dev": true,
+  "r2_buckets": [
+    {
+      "binding": "BUNDLES",
+      "bucket_name": "warp-3xui-private"
+    }
+  ]
+}

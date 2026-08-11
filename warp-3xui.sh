@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 PROJECT_NAME="warp-3xui-safe"
 DEFAULT_PORT="40000"
 DEFAULT_PROTOCOL="MASQUE"
 CONFIG_DIR="/etc/warp-3xui"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 MANAGER_PATH="/usr/local/sbin/warp3xui"
-CLOUDFLARE_BASE_DEFAULT="https://xray-manager-download.xinian5216.workers.dev"
+CLOUDFLARE_BASE_DEFAULT="https://warp-3xui-download.xinian5216.workers.dev"
+LEGACY_CLOUDFLARE_BASE="https://xray-manager-download.xinian5216.workers.dev"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 GOOGLE_TEST_URL="https://www.google.com/generate_204"
 YOUTUBE_REGION_URL="https://www.youtube.com/premium"
@@ -108,6 +109,9 @@ load_config() {
                 CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
             esac
         done < "${CONFIG_FILE}"
+    fi
+    if [[ "${CLOUDFLARE_BASE%/}" == "${LEGACY_CLOUDFLARE_BASE}" ]]; then
+        CLOUDFLARE_BASE="${CLOUDFLARE_BASE_DEFAULT}"
     fi
     [[ -z "${WARP3XUI_UPDATE_SOURCE:-}" ]] \
         || UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE}"

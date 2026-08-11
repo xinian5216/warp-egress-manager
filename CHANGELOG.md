@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 - 2026-08-10
+
+- 将下载链路从 `xray-manager` 拆分为专用 Worker `warp-3xui-download` 和专用 R2 桶 `warp-3xui-private`。
+- 公开引导入口改为 Worker 根路径 `/install.sh`，主脚本与校验文件继续受独立 Bearer Token 保护。
+- 将 Worker 源码、R2 绑定配置、路由测试和部署检查纳入仓库与 CI。
+- 已安装版本读取到旧共享 Worker 地址时会自动迁移到新的专用地址。
+
 ## 1.1.0 - 2026-08-10
 
 - `warp3xui` 无参数运行时进入可循环操作的管理菜单。

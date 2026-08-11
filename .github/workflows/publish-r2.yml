@@ -7,6 +7,7 @@ on:
     paths:
       - "warp-3xui.sh"
       - "cloudflare-install.sh"
+      - "VERSION"
       - ".github/workflows/publish-r2.yml"
   workflow_dispatch:
 
@@ -22,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      R2_BUCKET: xray-manager-private
+      R2_BUCKET: warp-3xui-private
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -45,7 +46,7 @@ jobs:
           set -Eeuo pipefail
           mkdir -p output
           install -m 755 warp-3xui.sh output/warp-3xui.sh
-          install -m 755 cloudflare-install.sh output/warp3xui-install.sh
+          install -m 755 cloudflare-install.sh output/install.sh
           sha256sum output/warp-3xui.sh | awk '{print $1}' > output/warp-3xui.sha256
       - name: Upload to private R2
         shell: bash
@@ -63,7 +64,7 @@ jobs:
             "text/x-shellscript; charset=utf-8" no-store
           upload output/warp-3xui.sha256 releases/warp3xui/warp-3xui.sha256 \
             "text/plain; charset=utf-8" no-store
-          upload output/warp3xui-install.sh public/warp3xui-install.sh \
+          upload output/install.sh public/install.sh \
             "text/x-shellscript; charset=utf-8" "public, max-age=300"
       - name: Verify objects
         shell: bash
@@ -71,7 +72,7 @@ jobs:
           set -Eeuo pipefail
           endpoint="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
           for key in \
-            public/warp3xui-install.sh \
+            public/install.sh \
             releases/warp3xui/warp-3xui.sh \
             releases/warp3xui/warp-3xui.sha256
           do
