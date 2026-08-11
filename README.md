@@ -33,7 +33,62 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 网络可以是 IPv4-only、IPv6-only 或双栈。安装时会分别探测公网 IPv4/IPv6，但不会据此
 修改默认路由。
 
-## 私有仓库安装
+## 快速安装
+
+### 方式一：Cloudflare Worker + 私有 R2（纯 IPv6 首选）
+
+复用 `xray-manager` 已有的 Worker 与私有 R2。首次下载不访问 GitHub，IPv4、双栈和
+没有 NAT64 的 IPv6-only VPS 都可以使用：
+
+```bash
+curl -fsSLo /tmp/warp3xui-install.sh \
+  https://xray-manager-download.xinian5216.workers.dev/warp3xui/install.sh &&
+sudo bash /tmp/warp3xui-install.sh
+```
+
+按提示输入与 `xray-manager` 相同的 Cloudflare 安装密钥。引导脚本会：
+
+1. 从 Cloudflare 边缘下载 R2 中受保护的主脚本和 SHA256；
+2. 校验 Bash 语法、项目标识和 SHA256；
+3. 安装 Cloudflare 官方 WARP 客户端并配置 Local Proxy；
+4. 把管理命令安装为 `/usr/local/sbin/warp3xui`；
+5. 记录 Cloudflare 更新通道，以后从菜单更新时仍不依赖 GitHub。
+
+> 该入口解决的是“纯 IPv6 无法获取私有 GitHub 脚本”的第一步。安装官方
+> `cloudflare-warp` 时仍需 VPS 能通过 IPv6 访问系统软件源和
+> `pkg.cloudflareclient.com`；它不会偷偷启用 WARP 全局路由来完成安装。
+
+### 一次性配置 R2 自动发布
+
+本仓库的 `.github/workflows/publish-r2.yml` 会在改动合并到 `main` 后上传：
+
+| R2 对象 | 用途 |
+|---|---|
+| `public/warp3xui-install.sh` | 公开引导脚本 |
+| `releases/warp3xui/warp-3xui.sh` | 需要 Bearer 密钥的主脚本 |
+| `releases/warp3xui/warp-3xui.sha256` | 需要 Bearer 密钥的校验值 |
+
+在 `warp-3xui-safe` 仓库中配置与 `xray-manager` 相同的 Actions 变量/密钥：
+
+- Variable：`CLOUDFLARE_ACCOUNT_ID`
+- Secrets：`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
+
+现有 Worker 增加一条公开路径映射：
+
+```js
+"/warp3xui/install.sh": "public/warp3xui-install.sh"
+```
+
+`/releases/warp3xui/*` 继续走原有 Bearer Token 校验，不要设为公开。配置完成后可检查：
+
+```bash
+curl -6I \
+  https://xray-manager-download.xinian5216.workers.dev/warp3xui/install.sh
+```
+
+不带密钥访问 `/releases/warp3xui/warp-3xui.sh` 返回 `401` 才是正常状态。
+
+### 方式二：私有 GitHub 安装
 
 私有仓库不能匿名使用 `curl raw.githubusercontent.com/... | bash`。不要把 GitHub Token
 直接写进命令历史。推荐在 VPS 上先登录 GitHub CLI：
@@ -46,8 +101,8 @@ gh api -H 'Accept: application/vnd.github.raw+json' \
 sudo bash /tmp/warp-3xui.sh
 ```
 
-如果 VPS（尤其 IPv6-only）无法访问 GitHub，先在电脑上下载 `warp-3xui.sh`，再用 SCP
-上传到 VPS：
+如果未配置 Cloudflare 通道且 VPS 无法访问 GitHub，也可先在电脑上下载
+`warp-3xui.sh`，再用 SCP 上传到 VPS：
 
 ```bash
 sudo bash warp-3xui.sh
@@ -150,6 +205,7 @@ Cloudflare Local Proxy 不适合承载 UDP/QUIC。只让 TCP 走 WARP、UDP 继�
 ## 管理命令
 
 ```bash
+sudo warp3xui
 sudo warp3xui status
 sudo warp3xui test --strict
 sudo warp3xui reconnect
@@ -160,8 +216,12 @@ sudo warp3xui snippets
 sudo warp3xui uninstall
 ```
 
+直接运行 `sudo warp3xui` 会进入循环管理菜单。执行状态检查、重连、更新等操作后按
+Enter 返回主菜单，选择 `0` 才退出。
+
 - `update-client`：通过 Cloudflare 官方 APT/YUM 仓库更新客户端，随后恢复 proxy 模式并验收。
-- `self-update`：先做 `bash -n` 与项目标识检查，再原子安装新脚本，旧版保留为
+- `self-update`：自动沿用首次安装来源；Cloudflare 通道额外校验 SHA256，随后执行
+  `bash -n` 与项目标识检查，再原子安装新脚本，旧版保留为
   `/usr/local/sbin/warp3xui.bak`。
 - `rotate`：删除并重建 WARP 注册。它可能更换出口，但 WARP 不支持指定国家，不能保证修复
   Google 地区判断。
@@ -171,7 +231,7 @@ sudo warp3xui uninstall
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
 - 第三方客户端不打包进仓库，始终来自 Cloudflare 官方软件源；
-- GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查；
+- GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 
 ## 故障排查
