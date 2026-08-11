@@ -37,16 +37,17 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 
 ### 方式一：Cloudflare Worker + 私有 R2（纯 IPv6 首选）
 
-复用 `xray-manager` 已有的 Worker 与私有 R2。首次下载不访问 GitHub，IPv4、双栈和
-没有 NAT64 的 IPv6-only VPS 都可以使用：
+本项目使用独立的 Worker `warp-3xui-download` 与私有 R2 桶
+`warp-3xui-private`，不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，
+IPv4、双栈和没有 NAT64 的 IPv6-only VPS 都可以使用：
 
 ```bash
 curl -fsSLo /tmp/warp3xui-install.sh \
-  https://xray-manager-download.xinian5216.workers.dev/warp3xui/install.sh &&
+  https://warp-3xui-download.xinian5216.workers.dev/install.sh &&
 sudo bash /tmp/warp3xui-install.sh
 ```
 
-按提示输入与 `xray-manager` 相同的 Cloudflare 安装密钥。引导脚本会：
+按提示输入本项目专用的 Cloudflare 安装密钥。引导脚本会：
 
 1. 从 Cloudflare 边缘下载 R2 中受保护的主脚本和 SHA256；
 2. 校验 Bash 语法、项目标识和 SHA256；
@@ -64,26 +65,44 @@ sudo bash /tmp/warp3xui-install.sh
 
 | R2 对象 | 用途 |
 |---|---|
-| `public/warp3xui-install.sh` | 公开引导脚本 |
+| `public/install.sh` | 公开引导脚本 |
 | `releases/warp3xui/warp-3xui.sh` | 需要 Bearer 密钥的主脚本 |
 | `releases/warp3xui/warp-3xui.sha256` | 需要 Bearer 密钥的校验值 |
 
-在 `warp-3xui-safe` 仓库中配置与 `xray-manager` 相同的 Actions 变量/密钥：
+先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
+写入”权限的 R2 API Token。把新凭据配置到 `warp-3xui-safe` 仓库：
 
 - Variable：`CLOUDFLARE_ACCOUNT_ID`
 - Secrets：`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
 
-现有 Worker 增加一条公开路径映射：
+`CLOUDFLARE_ACCOUNT_ID` 可以与 `xray-manager` 相同；两个 R2 Secrets 应使用刚创建的
+专用 Token，不要复用 `xray-manager` 的凭据。
 
-```js
-"/warp3xui/install.sh": "public/warp3xui-install.sh"
-```
+### 部署专用 Worker
 
-`/releases/warp3xui/*` 继续走原有 Bearer Token 校验，不要设为公开。配置完成后可检查：
+仓库的 `worker/` 目录包含完整 Worker 源码和 `wrangler.jsonc`。在 Cloudflare Workers
+中连接本 GitHub 仓库，并设置：
+
+| 项目 | 值 |
+|---|---|
+| Worker 名称 | `warp-3xui-download` |
+| 根目录 | `worker` |
+| 构建命令 | `npm ci` |
+| 部署命令 | `npm run deploy` |
+| R2 Binding | `BUNDLES` → `warp-3xui-private`（已写入配置） |
+
+为 Worker 添加一个独立 Secret：`INSTALL_TOKEN`。它就是用户运行引导脚本时输入的安装
+密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开：
+
+- `/install.sh`：公开引导脚本；
+- `/releases/warp3xui/warp-3xui.sh`：Bearer Token 保护；
+- `/releases/warp3xui/warp-3xui.sha256`：Bearer Token 保护。
+
+配置并完成首次发布后检查：
 
 ```bash
 curl -6I \
-  https://xray-manager-download.xinian5216.workers.dev/warp3xui/install.sh
+  https://warp-3xui-download.xinian5216.workers.dev/install.sh
 ```
 
 不带密钥访问 `/releases/warp3xui/warp-3xui.sh` 返回 `401` 才是正常状态。

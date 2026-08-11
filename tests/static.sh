@@ -16,6 +16,11 @@ if grep -Eq 'warp-cli( --accept-tos)? mode (warp|warp\+doh|tunnel_only)' "${scri
 fi
 
 grep -Fq 'UPDATE_SOURCE="cloudflare"' "${script}"
+grep -Fq 'warp-3xui-download.xinian5216.workers.dev' "${script}"
+grep -Fq 'warp-3xui-download.xinian5216.workers.dev' "${bootstrap}"
+! grep -Fq 'xray-manager-private' "${repo_dir}/.github/workflows/publish-r2.yml"
+grep -Fq 'R2_BUCKET: warp-3xui-private' "${repo_dir}/.github/workflows/publish-r2.yml"
+grep -Fq 'public/install.sh' "${repo_dir}/.github/workflows/publish-r2.yml"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${script}"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${bootstrap}"
 

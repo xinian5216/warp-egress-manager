@@ -18,3 +18,22 @@ jobs:
         run: shellcheck warp-3xui.sh cloudflare-install.sh tests/static.sh
       - name: Static tests
         run: bash tests/static.sh
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Test Worker routes
+        run: npm test
+      - name: Validate Worker deployment bundle
+        run: npm run check
