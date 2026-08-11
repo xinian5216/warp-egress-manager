@@ -46,7 +46,10 @@ grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'ARCHIVE_KEEP_VERSIONS: "2"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+# Match the literal workflow variables, not shell-expanded values.
+# shellcheck disable=SC2016
 grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/${delete_prefix}"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+# shellcheck disable=SC2016
 if grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/packages/cloudflare-warp"' \
     "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
     echo "Broad R2 package deletion found" >&2
