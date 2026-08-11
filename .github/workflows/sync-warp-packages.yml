@@ -1,0 +1,123 @@
+name: Sync official WARP packages to R2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "warp-3xui.sh"
+      - ".github/workflows/sync-warp-packages.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-warp-packages-r2
+  cancel-in-progress: false
+
+jobs:
+  fetch-deb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        codename:
+          - bookworm
+          - trixie
+          - jammy
+          - noble
+          - resolute
+    steps:
+      - name: Fetch and verify official package
+        shell: bash
+        env:
+          CODENAME: ${{ matrix.codename }}
+        run: |
+          set -Eeuo pipefail
+          packages_url="https://pkg.cloudflareclient.com/dists/${CODENAME}/main/binary-amd64/Packages"
+          mkdir -p "output/${CODENAME}"
+          curl --fail --silent --show-error --location --retry 3 \
+            "${packages_url}" -o packages.txt
+          stanza="$(awk 'BEGIN { RS=""; FS="\n" } $1 == "Package: cloudflare-warp" { print; exit }' packages.txt)"
+          [[ -n "${stanza}" ]] || { echo "::error::No cloudflare-warp package for ${CODENAME}"; exit 1; }
+          version="$(sed -n 's/^Version: //p' <<<"${stanza}" | head -n1)"
+          filename="$(sed -n 's/^Filename: //p' <<<"${stanza}" | head -n1)"
+          expected="$(sed -n 's/^SHA256: //p' <<<"${stanza}" | head -n1)"
+          [[ "${version}" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]]
+          [[ "${filename}" =~ ^pool/[0-9A-Za-z._/+~-]+/cloudflare-warp_[0-9A-Za-z._:+~-]+_amd64\.deb$ ]]
+          [[ "${expected}" =~ ^[0-9a-f]{64}$ ]]
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://pkg.cloudflareclient.com/${filename}" \
+            -o "output/${CODENAME}/cloudflare-warp.deb"
+          actual="$(sha256sum "output/${CODENAME}/cloudflare-warp.deb" | awk '{print $1}')"
+          [[ "${actual}" == "${expected}" ]] || { echo "::error::SHA256 mismatch"; exit 1; }
+          printf '%s\n' "${expected}" > "output/${CODENAME}/cloudflare-warp.sha256"
+          printf '%s\n' "${version}" > "output/${CODENAME}/version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-warp-${{ matrix.codename }}-amd64
+          path: output/${{ matrix.codename }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: fetch-deb
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      R2_BUCKET: warp-3xui-private
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+    steps:
+      - name: Validate credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in CLOUDFLARE_ACCOUNT_ID AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            [[ -n "${!name:-}" ]] || { echo "::error::Missing ${name}"; exit 1; }
+          done
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cloudflare-warp-*-amd64
+          path: output
+      - name: Publish latest and versioned archives
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          for artifact_dir in output/cloudflare-warp-*-amd64; do
+            codename="${artifact_dir#output/cloudflare-warp-}"
+            codename="${codename%-amd64}"
+            version="$(tr -d '[:space:]' < "${artifact_dir}/version")"
+            [[ "${codename}" =~ ^[a-z0-9._-]+$ ]]
+            [[ "${version}" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]]
+            latest="packages/cloudflare-warp/deb/${codename}/amd64/latest"
+            archive="packages/cloudflare-warp/deb/${codename}/amd64/archive/${version}"
+            for prefix in "${latest}" "${archive}"; do
+              aws s3 cp "${artifact_dir}/cloudflare-warp.deb" \
+                "s3://${R2_BUCKET}/${prefix}/cloudflare-warp.deb" \
+                --endpoint-url "${endpoint}" \
+                --content-type application/vnd.debian.binary-package \
+                --cache-control private,no-store --only-show-errors
+              aws s3 cp "${artifact_dir}/cloudflare-warp.sha256" \
+                "s3://${R2_BUCKET}/${prefix}/cloudflare-warp.sha256" \
+                --endpoint-url "${endpoint}" \
+                --content-type "text/plain; charset=utf-8" \
+                --cache-control private,no-store --only-show-errors
+              aws s3 cp "${artifact_dir}/version" \
+                "s3://${R2_BUCKET}/${prefix}/version" \
+                --endpoint-url "${endpoint}" \
+                --content-type "text/plain; charset=utf-8" \
+                --cache-control private,no-store --only-show-errors
+            done
+            aws s3api head-object --bucket "${R2_BUCKET}" \
+              --key "${latest}/cloudflare-warp.deb" \
+              --endpoint-url "${endpoint}" >/dev/null
+            echo "Published ${codename} ${version}"
+          done
