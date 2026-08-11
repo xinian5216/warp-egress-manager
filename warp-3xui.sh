@@ -2,13 +2,19 @@
 set -Eeuo pipefail
 
 SCRIPT_VERSION="1.2.0"
-PROJECT_NAME="warp-3xui-safe"
+PROJECT_ID="warp-3xui-safe"
+PROJECT_NAME="WARP Safe Manager"
 DEFAULT_PORT="40000"
 DEFAULT_PROTOCOL="MASQUE"
 DEFAULT_EGRESS_MODE="AUTO"
-CONFIG_DIR="${WARP3XUI_CONFIG_DIR:-/etc/warp-3xui}"
+CONFIG_DIR="${WARPM_CONFIG_DIR:-${WARP3XUI_CONFIG_DIR:-/etc/warp-manager}}"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
-MANAGER_PATH="${WARP3XUI_MANAGER_PATH:-/usr/local/sbin/warp3xui}"
+PROXY_ENV_FILE="${CONFIG_DIR}/proxy.env"
+PROXYCHAINS_FILE="${CONFIG_DIR}/proxychains.conf"
+LEGACY_CONFIG_DIR="/etc/warp-3xui"
+LEGACY_CONFIG_FILE="${LEGACY_CONFIG_DIR}/config.env"
+MANAGER_PATH="${WARPM_MANAGER_PATH:-${WARP3XUI_MANAGER_PATH:-/usr/local/sbin/warpm}}"
+LEGACY_MANAGER_PATH="/usr/local/sbin/warp3xui"
 CLOUDFLARE_BASE_DEFAULT="https://warp-3xui-download.xinian5216.workers.dev"
 LEGACY_CLOUDFLARE_BASE="https://xray-manager-download.xinian5216.workers.dev"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
@@ -27,8 +33,8 @@ PORT="${DEFAULT_PORT}"
 TUNNEL_PROTOCOL="${DEFAULT_PROTOCOL}"
 EGRESS_MODE="${DEFAULT_EGRESS_MODE}"
 UPDATE_REPO="xinian5216/warp-3xui-safe"
-UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE:-github}"
-CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}"
+UPDATE_SOURCE="${WARPM_UPDATE_SOURCE:-${WARP3XUI_UPDATE_SOURCE:-github}}"
+CLOUDFLARE_BASE="${WARPM_CLOUDFLARE_URL:-${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}}"
 NEW_INSTALL=0
 
 log() { printf '%b\n' "${CYAN}[信息]${NC} $*"; }
@@ -56,27 +62,31 @@ trap on_error ERR
 
 usage() {
     cat <<'EOF'
-WARP for 3x-ui 安全管理脚本
+WARP Safe Manager
 
 用法：
   sudo bash warp-3xui.sh                 交互菜单
   sudo bash warp-3xui.sh install [选项]  安装并配置本地 WARP SOCKS5
-  sudo warp3xui status                   查看状态与出口
-  sudo warp3xui test [--strict]          完整验证（strict 遇到 CN 退出非 0）
-  sudo warp3xui reconnect                重新连接并验证
-  sudo warp3xui rotate                   重建 WARP 注册并验证
-  sudo warp3xui update-client            更新 Cloudflare WARP 客户端
-  sudo warp3xui set-egress MODE          切换 IPv4/IPv6/双栈出口并重生成示例
-  sudo warp3xui self-update [选项]       更新本管理脚本
-  sudo warp3xui snippets                 重新生成 3x-ui/Xray 示例
-  sudo warp3xui uninstall                卸载
+  sudo warpm status                       查看状态与出口
+  sudo warpm test [--strict]              完整验证（strict 遇到 CN 退出非 0）
+  warpm env                               输出当前 Shell 代理环境变量
+  warpm proxy-info                        显示 SOCKS5、ProxyChains 与命令示例
+  warpm run -- COMMAND [ARG...]           让支持 ALL_PROXY 的单条命令经 WARP
+  warpm curl [-4|-6] [CURL_ARG...]        用 WARP 执行 curl，可严格选地址族
+  sudo warpm reconnect                    重新连接并验证
+  sudo warpm rotate                       重建 WARP 注册并验证
+  sudo warpm update-client                更新 Cloudflare WARP 客户端
+  sudo warpm set-egress MODE              切换 IPv4/IPv6/双栈验收与 Xray 示例
+  sudo warpm self-update [选项]           更新本管理脚本
+  sudo warpm integrations                 生成通用代理与可选 3x-ui/Xray 示例
+  sudo warpm uninstall                    卸载
 
 install 选项：
   --port PORT             本地 SOCKS5 端口，默认 40000
   --protocol auto|masque|wireguard
                           隧道协议，默认 MASQUE；auto 会在失败时回退
   --egress auto|ipv4|ipv6|dual
-                          Xray 可选出口；auto 按原生网络补齐缺失地址族
+                          WARP 出口验收与 curl/Xray 地址族；auto 补齐单栈
   --license-file PATH     可选，从本地权限受控文件读取官方 WARP+ Key
   --repo OWNER/REPO       私有仓库名，用于后续 gh 自更新
   --non-interactive       不询问，使用给定值/默认值
@@ -90,8 +100,8 @@ self-update 选项：
 
 安全保证：
   本脚本只启用 127.0.0.1 上的 WARP Local Proxy，不启用系统 WARP 模式，
-  不添加 IPv4/IPv6 默认路由，不接管 SSH、3x-ui 面板或其他系统流量。
-  出口模式只影响生成的 Xray 出站和验收项目，不会给网卡改地址或替换原生出口。
+  不添加 IPv4/IPv6 默认路由，不接管 SSH、管理面板或其他系统流量。
+  出口模式只影响验收、warpm curl 默认值和 Xray 示例，不会给网卡改地址或替换原生出口。
 EOF
 }
 
@@ -104,9 +114,14 @@ warp_cli() {
 }
 
 load_config() {
+    local config_to_read="" key value
     if [[ -r "${CONFIG_FILE}" ]]; then
+        config_to_read="${CONFIG_FILE}"
+    elif [[ -r "${LEGACY_CONFIG_FILE}" ]]; then
+        config_to_read="${LEGACY_CONFIG_FILE}"
+    fi
+    if [[ -n "${config_to_read}" ]]; then
         # 该文件由本脚本生成，只允许固定键值；不直接 source，避免执行任意内容。
-        local key value
         while IFS='=' read -r key value; do
             case "${key}" in
                 PORT) PORT="${value}" ;;
@@ -116,15 +131,27 @@ load_config() {
                 UPDATE_SOURCE) UPDATE_SOURCE="${value}" ;;
                 CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
             esac
-        done < "${CONFIG_FILE}"
+        done < "${config_to_read}"
+    elif [[ -r "${PROXY_ENV_FILE}" ]]; then
+        # 非 root 用户只需读取公开的本机代理端口。
+        while IFS='=' read -r key value; do
+            case "${key}" in
+                WARP_PROXY_PORT) PORT="${value}" ;;
+                WARP_EGRESS_MODE) EGRESS_MODE="${value}" ;;
+            esac
+        done < "${PROXY_ENV_FILE}"
     fi
     if [[ "${CLOUDFLARE_BASE%/}" == "${LEGACY_CLOUDFLARE_BASE}" ]]; then
         CLOUDFLARE_BASE="${CLOUDFLARE_BASE_DEFAULT}"
     fi
     [[ -z "${WARP3XUI_UPDATE_SOURCE:-}" ]] \
         || UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE}"
+    [[ -z "${WARPM_UPDATE_SOURCE:-}" ]] \
+        || UPDATE_SOURCE="${WARPM_UPDATE_SOURCE}"
     [[ -z "${WARP3XUI_CLOUDFLARE_URL:-}" ]] \
         || CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL}"
+    [[ -z "${WARPM_CLOUDFLARE_URL:-}" ]] \
+        || CLOUDFLARE_BASE="${WARPM_CLOUDFLARE_URL}"
     case "${UPDATE_SOURCE}" in
         github|cloudflare) ;;
         *) die "无效更新来源：${UPDATE_SOURCE}" ;;
@@ -373,7 +400,7 @@ connect_with_fallback() {
 }
 
 save_config() {
-    install -d -m 700 "${CONFIG_DIR}"
+    install -d -m 755 "${CONFIG_DIR}"
     {
         printf 'PORT=%s\n' "${PORT}"
         printf 'TUNNEL_PROTOCOL=%s\n' "${TUNNEL_PROTOCOL}"
@@ -383,6 +410,81 @@ save_config() {
         printf 'CLOUDFLARE_BASE=%s\n' "${CLOUDFLARE_BASE%/}"
     } > "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
+    render_generic_proxy_files
+}
+
+render_generic_proxy_files() {
+    install -d -m 755 "${CONFIG_DIR}"
+    {
+        printf 'WARP_PROXY_HOST=127.0.0.1\n'
+        printf 'WARP_PROXY_PORT=%s\n' "${PORT}"
+        printf 'WARP_PROXY_URL=socks5h://127.0.0.1:%s\n' "${PORT}"
+        printf 'WARP_EGRESS_MODE=%s\n' "${EGRESS_MODE}"
+    } > "${PROXY_ENV_FILE}"
+    cat > "${PROXYCHAINS_FILE}" <<EOF
+strict_chain
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+
+[ProxyList]
+socks5 127.0.0.1 ${PORT}
+EOF
+    chmod 644 "${PROXY_ENV_FILE}" "${PROXYCHAINS_FILE}"
+}
+
+print_proxy_env() {
+    load_config
+    validate_port "${PORT}"
+    printf "export ALL_PROXY='socks5h://127.0.0.1:%s'\n" "${PORT}"
+    printf "export all_proxy='socks5h://127.0.0.1:%s'\n" "${PORT}"
+    printf "export NO_PROXY='localhost,127.0.0.1,::1'\n"
+    printf "export no_proxy='localhost,127.0.0.1,::1'\n"
+}
+
+show_proxy_info() {
+    load_config
+    validate_port "${PORT}"
+    printf 'SOCKS5：127.0.0.1:%s\n' "${PORT}"
+    printf 'URL：socks5h://127.0.0.1:%s\n' "${PORT}"
+    printf '环境变量：warpm env\n'
+    printf '单条命令：warpm run -- curl https://www.cloudflare.com/cdn-cgi/trace\n'
+    printf 'ProxyChains：%s\n' "${PROXYCHAINS_FILE}"
+}
+
+run_via_warp() {
+    load_config
+    validate_port "${PORT}"
+    [[ "${1:-}" == "--" ]] && shift
+    (($#)) || die "run 后需要提供命令；示例：warpm run -- curl https://example.com"
+    export ALL_PROXY="socks5h://127.0.0.1:${PORT}"
+    export all_proxy="${ALL_PROXY}"
+    export NO_PROXY="localhost,127.0.0.1,::1"
+    export no_proxy="${NO_PROXY}"
+    exec "$@"
+}
+
+curl_via_warp() {
+    load_config
+    validate_port "${PORT}"
+    EGRESS_MODE="$(normalize_egress_mode "${EGRESS_MODE}")"
+    local family="auto"
+    local -a proxy_args=(--socks5-hostname "127.0.0.1:${PORT}")
+    case "${EGRESS_MODE}" in
+        IPV4) family="4" ;;
+        IPV6) family="6" ;;
+    esac
+    case "${1:-}" in
+        -4|--ipv4) family="4"; shift ;;
+        -6|--ipv6) family="6"; shift ;;
+    esac
+    (($#)) || die "curl 后需要提供 URL 或其他 curl 参数。"
+    case "${family}" in
+        4) proxy_args=(--ipv4 --socks5 "127.0.0.1:${PORT}") ;;
+        6) proxy_args=(--ipv6 --socks5 "127.0.0.1:${PORT}") ;;
+    esac
+    exec curl "${proxy_args[@]}" "$@"
 }
 
 install_manager() {
@@ -390,6 +492,9 @@ install_manager() {
     source_path="$(readlink -f "${BASH_SOURCE[0]}")"
     if [[ "${source_path}" != "${MANAGER_PATH}" ]]; then
         install -m 755 "${source_path}" "${MANAGER_PATH}"
+    fi
+    if [[ "${LEGACY_MANAGER_PATH}" != "${MANAGER_PATH}" ]]; then
+        ln -sfn "${MANAGER_PATH}" "${LEGACY_MANAGER_PATH}"
     fi
 }
 
@@ -422,7 +527,7 @@ render_snippets() {
     ensure_effective_egress_mode
     selected_tag="$(selected_outbound_tag)"
     selected_file="${CONFIG_DIR}/xray-outbound-${selected_tag#warp-}.json"
-    install -d -m 700 "${CONFIG_DIR}"
+    install -d -m 755 "${CONFIG_DIR}"
 
     render_outbound_json "warp-ipv4" "ForceIPv4" \
         > "${CONFIG_DIR}/xray-outbound-ipv4.json"
@@ -473,8 +578,15 @@ EOF
         "${CONFIG_DIR}/xray-routing-rule-udp-block.json" \
         > "${CONFIG_DIR}/xray-routing-rules.json"
     chmod 600 "${CONFIG_DIR}"/*.json
-    ok "3x-ui/Xray 示例已生成：${CONFIG_DIR}/xray-outbounds.json"
+    ok "可选 Xray/3x-ui 示例已生成：${CONFIG_DIR}/xray-outbounds.json"
     log "当前建议路由标签：${selected_tag}（$(egress_mode_label)）。"
+}
+
+render_integrations() {
+    load_config
+    render_generic_proxy_files
+    render_snippets
+    ok "通用代理环境与 ProxyChains 示例已生成在 ${CONFIG_DIR}/。"
 }
 
 extract_youtube_region() {
@@ -584,6 +696,7 @@ show_status() {
     load_config
     ensure_effective_egress_mode
     printf '\n%s v%s\n' "${PROJECT_NAME}" "${SCRIPT_VERSION}"
+    printf '项目标识：%s\n' "${PROJECT_ID}"
     printf '代理地址：127.0.0.1:%s\n' "${PORT}"
     printf '隧道协议：%s\n' "${TUNNEL_PROTOCOL}"
     printf '可选出口：%s\n\n' "$(egress_mode_label)"
@@ -657,10 +770,10 @@ interactive_egress_options() {
         *) default_choice=4 ;;
     esac
     cat <<'EOF'
-给 3x-ui/Xray 提供的 WARP 出口：
-  1. 仅 IPv4（IPv6-only VPS 补 IPv4；也适合替换“送中”IPv4）
-  2. 仅 IPv6（IPv4-only VPS 补 IPv6）
-  3. IPv4 + IPv6（分别生成两个强制地址族出站，并提供自动出站）
+WARP 出口验收与可选 Xray 地址族：
+  1. IPv4（IPv6-only 补 IPv4；warpm curl 默认 -4）
+  2. IPv6（IPv4-only 补 IPv6；warpm curl 默认 -6）
+  3. IPv4 + IPv6（两族都验收，普通 SOCKS 应用自行选择）
   4. 自动（单栈补另一族，双栈提供两族）
 EOF
     printf '请选择 [%s]：' "${default_choice}"
@@ -687,7 +800,7 @@ set_egress_mode() {
     fi
     ensure_effective_egress_mode
     save_config
-    render_snippets
+    render_integrations
     ok "已切换为 $(egress_mode_label)。系统默认路由和原生出口没有变化。"
     if command -v warp-cli >/dev/null 2>&1; then
         test_warp 0 || warn "配置已保存，但所选出口尚未全部通过验收。"
@@ -718,9 +831,10 @@ do_install() {
     install_manager
     render_snippets
     NEW_INSTALL=0
-    test_warp 0 || warn "主体已安装，但仍有验收项需要查看。请运行：sudo warp3xui test --strict"
+    test_warp 0 || warn "主体已安装，但仍有验收项需要查看。请运行：sudo warpm test --strict"
     ok "安装完成：$(egress_mode_label)。原生出口和系统默认路由保持不变。"
-    log "3x-ui 示例：${CONFIG_DIR}/xray-outbounds.json"
+    log "直接使用：warpm proxy-info；warpm run -- COMMAND；warpm curl URL"
+    log "可选 Xray/3x-ui 示例：${CONFIG_DIR}/xray-outbounds.json"
 }
 
 do_reconnect() {
@@ -778,7 +892,7 @@ sha256_file() {
 }
 
 download_cloudflare_update() {
-    local output="$1" token="${WARP3XUI_INSTALL_TOKEN:-}" temp_dir curl_config checksum expected actual
+    local output="$1" token="${WARPM_INSTALL_TOKEN:-${WARP3XUI_INSTALL_TOKEN:-}}" temp_dir curl_config checksum expected actual
     CLOUDFLARE_BASE="${CLOUDFLARE_BASE%/}"
     if [[ -z "${token}" && -r /dev/tty ]]; then
         printf 'Cloudflare 安装密钥：' >/dev/tty
@@ -799,7 +913,7 @@ download_cloudflare_update() {
         printf '%s\n' 'connect-timeout = 15' 'max-time = 180' 'retry = 3'
     } > "${curl_config}"
     chmod 600 "${curl_config}"
-    unset token WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
+    unset token WARPM_INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
 
     if ! curl --config "${curl_config}" \
         "${CLOUDFLARE_BASE}/releases/warp3xui/warp-3xui.sh" \
@@ -860,20 +974,40 @@ self_update() {
             ;;
     esac
     bash -n "${temp_file}"
-    grep -q 'PROJECT_NAME="warp-3xui-safe"' "${temp_file}" || die "更新文件不是本项目脚本。"
+    grep -q 'PROJECT_ID="warp-3xui-safe"' "${temp_file}" || die "更新文件不是本项目脚本。"
     new_version="$(version_from_file "${temp_file}")"
     [[ -n "${new_version}" ]] || die "无法读取新脚本版本。"
     cp -a "${MANAGER_PATH}" "${MANAGER_PATH}.bak" 2>/dev/null || true
     install -m 755 "${temp_file}" "${MANAGER_PATH}"
+    if [[ "${LEGACY_MANAGER_PATH}" != "${MANAGER_PATH}" ]]; then
+        ln -sfn "${MANAGER_PATH}" "${LEGACY_MANAGER_PATH}"
+    fi
     rm -f "${temp_file}"
     save_config
-    ok "管理脚本已更新：${SCRIPT_VERSION} -> ${new_version}。备份为 ${MANAGER_PATH}.bak。"
+    ok "管理脚本已更新：${SCRIPT_VERSION} -> ${new_version}。主命令：warpm。"
+}
+
+remove_generated_files() {
+    local dir="$1"
+    rm -f \
+        "${dir}/config.env" \
+        "${dir}/proxy.env" \
+        "${dir}/proxychains.conf" \
+        "${dir}/xray-outbound.json" \
+        "${dir}/xray-outbound-ipv4.json" \
+        "${dir}/xray-outbound-ipv6.json" \
+        "${dir}/xray-outbound-auto.json" \
+        "${dir}/xray-outbounds.json" \
+        "${dir}/xray-routing-rule-tcp.json" \
+        "${dir}/xray-routing-rule-udp-block.json" \
+        "${dir}/xray-routing-rules.json" 2>/dev/null || true
+    rmdir "${dir}" 2>/dev/null || true
 }
 
 do_uninstall() {
     require_root
     load_config
-    printf '确认卸载 WARP for 3x-ui 和 cloudflare-warp 软件包？[y/N] '
+    printf '确认卸载 WARP Safe Manager 和 cloudflare-warp 软件包？[y/N] '
     read -r answer
     [[ "${answer,,}" == "y" ]] || { log "已取消。"; return 0; }
     warp_cli disconnect >/dev/null 2>&1 || true
@@ -891,9 +1025,9 @@ do_uninstall() {
             rm -f /etc/yum.repos.d/cloudflare-warp.repo
             ;;
     esac
-    rm -f "${MANAGER_PATH}" "${MANAGER_PATH}.bak"
-    rm -f "${CONFIG_FILE}" "${CONFIG_DIR}"/*.json 2>/dev/null || true
-    rmdir "${CONFIG_DIR}" 2>/dev/null || true
+    rm -f "${MANAGER_PATH}" "${MANAGER_PATH}.bak" "${LEGACY_MANAGER_PATH}"
+    remove_generated_files "${CONFIG_DIR}"
+    [[ "${LEGACY_CONFIG_DIR}" == "${CONFIG_DIR}" ]] || remove_generated_files "${LEGACY_CONFIG_DIR}"
     ok "已卸载。脚本从未修改系统默认路由，因此无需恢复 SSH 路由。"
 }
 
@@ -904,14 +1038,14 @@ show_menu() {
     while true; do
         cat <<EOF
 
-WARP for 3x-ui v${SCRIPT_VERSION}
+WARP Safe Manager v${SCRIPT_VERSION}
 1. 安装/重新配置
 2. 状态与完整验证
 3. 重新连接
 4. 重建 WARP 注册
 5. 更新 Cloudflare WARP 客户端
 6. 切换 IPv4/IPv6 WARP 出口
-7. 生成 3x-ui 配置示例
+7. 生成通用代理与可选 Xray/3x-ui 示例
 8. 更新本管理脚本
 9. 卸载
 0. 退出
@@ -925,7 +1059,7 @@ EOF
             4) do_rotate ;;
             5) update_client ;;
             6) set_egress_mode ;;
-            7) render_snippets ;;
+            7) render_integrations ;;
             8) self_update ;;
             9) do_uninstall; return 0 ;;
             0) return 0 ;;
@@ -951,8 +1085,12 @@ main() {
         rotate) do_rotate ;;
         update-client) update_client ;;
         set-egress) set_egress_mode "$@" ;;
+        env) print_proxy_env ;;
+        proxy-info|proxy) show_proxy_info ;;
+        run) run_via_warp "$@" ;;
+        curl) curl_via_warp "$@" ;;
         self-update) self_update "$@" ;;
-        snippets) require_root; load_config; render_snippets ;;
+        integrations|snippets) require_root; render_integrations ;;
         uninstall) do_uninstall ;;
         version|--version|-v) printf '%s\n' "${SCRIPT_VERSION}" ;;
         help|--help|-h) usage ;;
