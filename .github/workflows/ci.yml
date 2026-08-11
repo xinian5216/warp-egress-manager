@@ -11,10 +11,10 @@ jobs:
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install checks
         run: sudo apt-get update && sudo apt-get install -y shellcheck jq
       - name: ShellCheck
-        run: shellcheck warp-3xui.sh tests/static.sh
+        run: shellcheck warp-3xui.sh cloudflare-install.sh tests/static.sh
       - name: Static tests
         run: bash tests/static.sh
