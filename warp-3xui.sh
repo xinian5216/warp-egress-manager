@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.2.0"
 PROJECT_NAME="warp-3xui-safe"
 DEFAULT_PORT="40000"
 DEFAULT_PROTOCOL="MASQUE"
-CONFIG_DIR="/etc/warp-3xui"
+DEFAULT_EGRESS_MODE="AUTO"
+CONFIG_DIR="${WARP3XUI_CONFIG_DIR:-/etc/warp-3xui}"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
-MANAGER_PATH="/usr/local/sbin/warp3xui"
+MANAGER_PATH="${WARP3XUI_MANAGER_PATH:-/usr/local/sbin/warp3xui}"
 CLOUDFLARE_BASE_DEFAULT="https://warp-3xui-download.xinian5216.workers.dev"
 LEGACY_CLOUDFLARE_BASE="https://xray-manager-download.xinian5216.workers.dev"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
+TRACE_V4_URL="https://1.1.1.1/cdn-cgi/trace"
+TRACE_V6_URL="https://[2606:4700:4700::1111]/cdn-cgi/trace"
 GOOGLE_TEST_URL="https://www.google.com/generate_204"
 YOUTUBE_REGION_URL="https://www.youtube.com/premium"
 
@@ -22,11 +25,11 @@ NC='\033[0m'
 
 PORT="${DEFAULT_PORT}"
 TUNNEL_PROTOCOL="${DEFAULT_PROTOCOL}"
+EGRESS_MODE="${DEFAULT_EGRESS_MODE}"
 UPDATE_REPO="xinian5216/warp-3xui-safe"
 UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE:-github}"
 CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}"
 NEW_INSTALL=0
-LAST_TRACE=""
 
 log() { printf '%b\n' "${CYAN}[信息]${NC} $*"; }
 ok() { printf '%b\n' "${GREEN}[成功]${NC} $*"; }
@@ -63,6 +66,7 @@ WARP for 3x-ui 安全管理脚本
   sudo warp3xui reconnect                重新连接并验证
   sudo warp3xui rotate                   重建 WARP 注册并验证
   sudo warp3xui update-client            更新 Cloudflare WARP 客户端
+  sudo warp3xui set-egress MODE          切换 IPv4/IPv6/双栈出口并重生成示例
   sudo warp3xui self-update [选项]       更新本管理脚本
   sudo warp3xui snippets                 重新生成 3x-ui/Xray 示例
   sudo warp3xui uninstall                卸载
@@ -71,6 +75,8 @@ install 选项：
   --port PORT             本地 SOCKS5 端口，默认 40000
   --protocol auto|masque|wireguard
                           隧道协议，默认 MASQUE；auto 会在失败时回退
+  --egress auto|ipv4|ipv6|dual
+                          Xray 可选出口；auto 按原生网络补齐缺失地址族
   --license-file PATH     可选，从本地权限受控文件读取官方 WARP+ Key
   --repo OWNER/REPO       私有仓库名，用于后续 gh 自更新
   --non-interactive       不询问，使用给定值/默认值
@@ -85,6 +91,7 @@ self-update 选项：
 安全保证：
   本脚本只启用 127.0.0.1 上的 WARP Local Proxy，不启用系统 WARP 模式，
   不添加 IPv4/IPv6 默认路由，不接管 SSH、3x-ui 面板或其他系统流量。
+  出口模式只影响生成的 Xray 出站和验收项目，不会给网卡改地址或替换原生出口。
 EOF
 }
 
@@ -104,6 +111,7 @@ load_config() {
             case "${key}" in
                 PORT) PORT="${value}" ;;
                 TUNNEL_PROTOCOL) TUNNEL_PROTOCOL="${value}" ;;
+                EGRESS_MODE) EGRESS_MODE="${value}" ;;
                 UPDATE_REPO) UPDATE_REPO="${value}" ;;
                 UPDATE_SOURCE) UPDATE_SOURCE="${value}" ;;
                 CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
@@ -134,6 +142,26 @@ normalize_protocol() {
         masque) printf '%s' "MASQUE" ;;
         wireguard|wg) printf '%s' "WireGuard" ;;
         *) die "协议只能是 auto、masque 或 wireguard。" ;;
+    esac
+}
+
+normalize_egress_mode() {
+    case "${1,,}" in
+        auto) printf '%s' "AUTO" ;;
+        ipv4|4|v4) printf '%s' "IPV4" ;;
+        ipv6|6|v6) printf '%s' "IPV6" ;;
+        dual|both|46) printf '%s' "DUAL" ;;
+        *) die "出口模式只能是 auto、ipv4、ipv6 或 dual。" ;;
+    esac
+}
+
+egress_mode_label() {
+    case "${EGRESS_MODE}" in
+        IPV4) printf '%s' "WARP IPv4" ;;
+        IPV6) printf '%s' "WARP IPv6" ;;
+        DUAL) printf '%s' "WARP IPv4 + IPv6" ;;
+        AUTO) printf '%s' "自动补齐" ;;
+        *) printf '%s' "未知" ;;
     esac
 }
 
@@ -171,14 +199,14 @@ install_base_dependencies() {
 }
 
 trace_value() {
-    local family="$1" proxy="${2:-}" output
+    local family="$1" proxy="${2:-}" output url="${TRACE_URL}"
     local -a args=(--fail --silent --show-error --max-time 12)
     case "${family}" in
-        4) args+=(-4) ;;
-        6) args+=(-6) ;;
+        4) args+=(-4); url="${TRACE_V4_URL}" ;;
+        6) args+=(-6); url="${TRACE_V6_URL}" ;;
     esac
     [[ -z "${proxy}" ]] || args+=(--socks5-hostname "${proxy}")
-    output="$(curl "${args[@]}" "${TRACE_URL}" 2>/dev/null || true)"
+    output="$(curl "${args[@]}" "${url}" 2>/dev/null || true)"
     printf '%s' "${output}"
 }
 
@@ -202,8 +230,37 @@ detect_connectivity() {
     [[ -z "${DIRECT_V6}" ]] || log "原生 IPv6：${DIRECT_V6}"
 }
 
+ensure_effective_egress_mode() {
+    EGRESS_MODE="$(normalize_egress_mode "${EGRESS_MODE}")"
+    [[ "${EGRESS_MODE}" == "AUTO" ]] || return 0
+
+    if [[ -z "${DIRECT_V4+x}" || -z "${DIRECT_V6+x}" ]]; then
+        detect_connectivity
+    fi
+    if [[ -n "${DIRECT_V4}" && -n "${DIRECT_V6}" ]]; then
+        EGRESS_MODE="DUAL"
+    elif [[ -n "${DIRECT_V6}" ]]; then
+        EGRESS_MODE="IPV4"
+    elif [[ -n "${DIRECT_V4}" ]]; then
+        EGRESS_MODE="IPV6"
+    else
+        die "无法根据原生网络自动选择 WARP 出口。"
+    fi
+    log "自动选择：$(egress_mode_label)。原生出口不会被替换。"
+}
+
 install_cloudflare_repo() {
     detect_os
+    local -a repo_probe=(--fail --silent --show-error --location --max-time 15)
+    if [[ -z "${DIRECT_V4:-}" && -n "${DIRECT_V6:-}" ]]; then
+        repo_probe+=(-6)
+    elif [[ -n "${DIRECT_V4:-}" && -z "${DIRECT_V6:-}" ]]; then
+        repo_probe+=(-4)
+    fi
+    if ! curl "${repo_probe[@]}" https://pkg.cloudflareclient.com/pubkey.gpg \
+        --output /dev/null; then
+        die "当前原生网络无法访问 Cloudflare 官方软件源。WARP 尚未安装，不能用 WARP 自举；请先提供 NAT64/临时代理，或离线上传官方 cloudflare-warp 软件包。"
+    fi
     case "${OS_ID}" in
         debian|ubuntu)
             [[ -n "${OS_CODENAME}" ]] || die "无法识别 Debian/Ubuntu 代号。"
@@ -269,11 +326,9 @@ configure_proxy_mode() {
 }
 
 wait_for_proxy() {
-    local attempts="${1:-20}" i trace
+    local attempts="${1:-20}" i
     for ((i=1; i<=attempts; i++)); do
-        trace="$(trace_value auto "127.0.0.1:${PORT}")"
-        if grep -Eq '^warp=(on|plus)$' <<<"${trace}"; then
-            printf '%s' "${trace}"
+        if proxy_capabilities_ready; then
             return 0
         fi
         sleep 1
@@ -281,28 +336,40 @@ wait_for_proxy() {
     return 1
 }
 
+proxy_family_ready() {
+    local trace
+    trace="$(trace_value "$1" "127.0.0.1:${PORT}")"
+    grep -Eq '^warp=(on|plus)$' <<<"${trace}"
+}
+
+proxy_capabilities_ready() {
+    case "${EGRESS_MODE}" in
+        IPV4) proxy_family_ready 4 ;;
+        IPV6) proxy_family_ready 6 ;;
+        DUAL) proxy_family_ready 4 && proxy_family_ready 6 ;;
+        *) return 1 ;;
+    esac
+}
+
 connect_with_fallback() {
-    local requested="$1" trace
+    local requested="$1"
     if [[ "${requested}" == "AUTO" ]]; then
         log "先尝试 MASQUE。"
         configure_proxy_mode "MASQUE"
-        if trace="$(wait_for_proxy 15)"; then
+        if wait_for_proxy 15; then
             TUNNEL_PROTOCOL="MASQUE"
-            LAST_TRACE="${trace}"
             return 0
         fi
         warn "MASQUE 未通过验证，回退 WireGuard。"
         configure_proxy_mode "WireGuard"
-        trace="$(wait_for_proxy 20)" || return 1
+        wait_for_proxy 20 || return 1
         TUNNEL_PROTOCOL="WireGuard"
-        LAST_TRACE="${trace}"
         return 0
     fi
 
     configure_proxy_mode "${requested}"
-    trace="$(wait_for_proxy 20)" || return 1
+    wait_for_proxy 20 || return 1
     TUNNEL_PROTOCOL="${requested}"
-    LAST_TRACE="${trace}"
 }
 
 save_config() {
@@ -310,6 +377,7 @@ save_config() {
     {
         printf 'PORT=%s\n' "${PORT}"
         printf 'TUNNEL_PROTOCOL=%s\n' "${TUNNEL_PROTOCOL}"
+        printf 'EGRESS_MODE=%s\n' "${EGRESS_MODE}"
         printf 'UPDATE_REPO=%s\n' "${UPDATE_REPO}"
         printf 'UPDATE_SOURCE=%s\n' "${UPDATE_SOURCE}"
         printf 'CLOUDFLARE_BASE=%s\n' "${CLOUDFLARE_BASE%/}"
@@ -325,25 +393,70 @@ install_manager() {
     fi
 }
 
-render_snippets() {
-    install -d -m 700 "${CONFIG_DIR}"
-    cat > "${CONFIG_DIR}/xray-outbound.json" <<EOF
+render_outbound_json() {
+    local tag="$1" strategy="$2"
+    cat <<EOF
 {
-  "tag": "warp-google",
+  "tag": "${tag}",
   "protocol": "socks",
   "settings": {
     "address": "127.0.0.1",
     "port": ${PORT}
-  }
+  },
+  "targetStrategy": "${strategy}"
 }
 EOF
-    cat > "${CONFIG_DIR}/xray-routing-rule-tcp.json" <<'EOF'
+}
+
+selected_outbound_tag() {
+    case "${EGRESS_MODE}" in
+        IPV4) printf '%s' "warp-ipv4" ;;
+        IPV6) printf '%s' "warp-ipv6" ;;
+        DUAL) printf '%s' "warp-auto" ;;
+        *) die "无法为 ${EGRESS_MODE} 选择 Xray 出站。" ;;
+    esac
+}
+
+render_snippets() {
+    local selected_tag selected_file
+    ensure_effective_egress_mode
+    selected_tag="$(selected_outbound_tag)"
+    selected_file="${CONFIG_DIR}/xray-outbound-${selected_tag#warp-}.json"
+    install -d -m 700 "${CONFIG_DIR}"
+
+    render_outbound_json "warp-ipv4" "ForceIPv4" \
+        > "${CONFIG_DIR}/xray-outbound-ipv4.json"
+    render_outbound_json "warp-ipv6" "ForceIPv6" \
+        > "${CONFIG_DIR}/xray-outbound-ipv6.json"
+    render_outbound_json "warp-auto" "UseIP" \
+        > "${CONFIG_DIR}/xray-outbound-auto.json"
+
+    case "${EGRESS_MODE}" in
+        IPV4)
+            jq -s '.' "${CONFIG_DIR}/xray-outbound-ipv4.json" \
+                > "${CONFIG_DIR}/xray-outbounds.json"
+            ;;
+        IPV6)
+            jq -s '.' "${CONFIG_DIR}/xray-outbound-ipv6.json" \
+                > "${CONFIG_DIR}/xray-outbounds.json"
+            ;;
+        DUAL)
+            jq -s '.' \
+                "${CONFIG_DIR}/xray-outbound-ipv4.json" \
+                "${CONFIG_DIR}/xray-outbound-ipv6.json" \
+                "${CONFIG_DIR}/xray-outbound-auto.json" \
+                > "${CONFIG_DIR}/xray-outbounds.json"
+            ;;
+    esac
+    cp -- "${selected_file}" "${CONFIG_DIR}/xray-outbound.json"
+
+    cat > "${CONFIG_DIR}/xray-routing-rule-tcp.json" <<EOF
 {
   "type": "field",
   "domain": ["geosite:google"],
   "network": "tcp",
-  "outboundTag": "warp-google",
-  "ruleTag": "Google via WARP"
+  "outboundTag": "${selected_tag}",
+  "ruleTag": "Google via $(egress_mode_label)"
 }
 EOF
     cat > "${CONFIG_DIR}/xray-routing-rule-udp-block.json" <<'EOF'
@@ -355,36 +468,73 @@ EOF
   "ruleTag": "Block Google QUIC leak"
 }
 EOF
+    jq -s '.' \
+        "${CONFIG_DIR}/xray-routing-rule-tcp.json" \
+        "${CONFIG_DIR}/xray-routing-rule-udp-block.json" \
+        > "${CONFIG_DIR}/xray-routing-rules.json"
     chmod 600 "${CONFIG_DIR}"/*.json
-    ok "3x-ui/Xray 示例已生成在 ${CONFIG_DIR}/。"
+    ok "3x-ui/Xray 示例已生成：${CONFIG_DIR}/xray-outbounds.json"
+    log "当前建议路由标签：${selected_tag}（$(egress_mode_label)）。"
 }
 
 extract_youtube_region() {
     local body
+    local -a proxy_args=(--socks5-hostname "127.0.0.1:${PORT}")
+    case "${EGRESS_MODE}" in
+        IPV4) proxy_args=(--ipv4 --socks5 "127.0.0.1:${PORT}") ;;
+        IPV6) proxy_args=(--ipv6 --socks5 "127.0.0.1:${PORT}") ;;
+    esac
     body="$(curl --fail --silent --show-error --location --max-time 20 \
-        --socks5-hostname "127.0.0.1:${PORT}" "${YOUTUBE_REGION_URL}" 2>/dev/null || true)"
+        "${proxy_args[@]}" "${YOUTUBE_REGION_URL}" 2>/dev/null || true)"
     grep -oE '"(countryCode|GL|INNERTUBE_CONTEXT_GL)":"[A-Z]{2}"' <<<"${body}" \
         | head -n1 | sed -E 's/.*:"([A-Z]{2})"/\1/' || true
 }
 
-test_warp() {
-    local strict="${1:-0}" trace warp_state warp_ip location google_code yt_region listen_line failures=0
-    trace="$(trace_value auto "127.0.0.1:${PORT}")"
+test_warp_family() {
+    local family="$1" label trace warp_state warp_ip location
+    if [[ "${family}" == "4" ]]; then label="IPv4"; else label="IPv6"; fi
+    trace="$(trace_value "${family}" "127.0.0.1:${PORT}")"
     warp_state="$(awk -F= '$1=="warp"{print $2}' <<<"${trace}")"
     warp_ip="$(awk -F= '$1=="ip"{print $2}' <<<"${trace}")"
     location="$(awk -F= '$1=="loc"{print $2}' <<<"${trace}")"
 
-    if [[ "${warp_state}" =~ ^(on|plus)$ ]]; then
-        ok "WARP 隧道：${warp_state}"
-        log "WARP 出口 IP：${warp_ip:-未知}"
-        log "Cloudflare 出口地区：${location:-未知}"
-    else
-        warn "WARP trace 未返回 on/plus。"
-        ((failures+=1))
+    if [[ "${warp_state}" =~ ^(on|plus)$ && -n "${warp_ip}" ]]; then
+        if [[ "${family}" == "4" && "${warp_ip}" == *:* ]]; then
+            warn "WARP ${label} 验收返回了非 IPv4 地址：${warp_ip}"
+            return 1
+        fi
+        if [[ "${family}" == "6" && "${warp_ip}" != *:* ]]; then
+            warn "WARP ${label} 验收返回了非 IPv6 地址：${warp_ip}"
+            return 1
+        fi
+        ok "WARP ${label} 出口：${warp_ip}（${location:-地区未知}，${warp_state}）"
+        return 0
     fi
+    warn "WARP ${label} 出口不可用。"
+    return 1
+}
+
+test_warp() {
+    local strict="${1:-0}" google_code yt_region listen_line failures=0
+    local -a proxy_args=(--socks5-hostname "127.0.0.1:${PORT}")
+    ensure_effective_egress_mode
+
+    case "${EGRESS_MODE}" in
+        IPV4) test_warp_family 4 || ((failures+=1)) ;;
+        IPV6) test_warp_family 6 || ((failures+=1)) ;;
+        DUAL)
+            test_warp_family 4 || ((failures+=1))
+            test_warp_family 6 || ((failures+=1))
+            ;;
+    esac
+
+    case "${EGRESS_MODE}" in
+        IPV4) proxy_args=(--ipv4 --socks5 "127.0.0.1:${PORT}") ;;
+        IPV6) proxy_args=(--ipv6 --socks5 "127.0.0.1:${PORT}") ;;
+    esac
 
     google_code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 \
-        --socks5-hostname "127.0.0.1:${PORT}" "${GOOGLE_TEST_URL}" 2>/dev/null || true)"
+        "${proxy_args[@]}" "${GOOGLE_TEST_URL}" 2>/dev/null || true)"
     if [[ "${google_code}" == "204" ]]; then
         ok "Google 经 WARP 连通：HTTP 204"
     else
@@ -432,9 +582,11 @@ test_warp() {
 
 show_status() {
     load_config
+    ensure_effective_egress_mode
     printf '\n%s v%s\n' "${PROJECT_NAME}" "${SCRIPT_VERSION}"
     printf '代理地址：127.0.0.1:%s\n' "${PORT}"
-    printf '隧道协议：%s\n\n' "${TUNNEL_PROTOCOL}"
+    printf '隧道协议：%s\n' "${TUNNEL_PROTOCOL}"
+    printf '可选出口：%s\n\n' "$(egress_mode_label)"
     if command -v warp-cli >/dev/null 2>&1; then
         warp_cli status || true
         printf '\n'
@@ -454,6 +606,7 @@ parse_install_args() {
         case "$1" in
             --port) [[ $# -ge 2 ]] || die "--port 缺少值"; PORT="$2"; shift 2 ;;
             --protocol) [[ $# -ge 2 ]] || die "--protocol 缺少值"; TUNNEL_PROTOCOL="$(normalize_protocol "$2")"; shift 2 ;;
+            --egress) [[ $# -ge 2 ]] || die "--egress 缺少值"; EGRESS_MODE="$(normalize_egress_mode "$2")"; shift 2 ;;
             --license-file) [[ $# -ge 2 ]] || die "--license-file 缺少值"; LICENSE_FILE="$2"; shift 2 ;;
             --repo) [[ $# -ge 2 ]] || die "--repo 缺少值"; UPDATE_REPO="$2"; shift 2 ;;
             --non-interactive) NON_INTERACTIVE=1; shift ;;
@@ -462,6 +615,7 @@ parse_install_args() {
     done
     validate_port "${PORT}"
     [[ "${TUNNEL_PROTOCOL}" =~ ^(AUTO|MASQUE|WireGuard)$ ]] || TUNNEL_PROTOCOL="$(normalize_protocol "${TUNNEL_PROTOCOL}")"
+    EGRESS_MODE="$(normalize_egress_mode "${EGRESS_MODE}")"
     LICENSE_KEY=""
     if [[ -n "${LICENSE_FILE}" ]]; then
         [[ -r "${LICENSE_FILE}" ]] || die "无法读取 WARP+ Key 文件：${LICENSE_FILE}"
@@ -490,43 +644,91 @@ EOF
         3) TUNNEL_PROTOCOL="AUTO" ;;
         *) die "无效选项。" ;;
     esac
+
+    interactive_egress_options
+}
+
+interactive_egress_options() {
+    local default_choice input
+    case "${EGRESS_MODE}" in
+        IPV4) default_choice=1 ;;
+        IPV6) default_choice=2 ;;
+        DUAL) default_choice=3 ;;
+        *) default_choice=4 ;;
+    esac
+    cat <<'EOF'
+给 3x-ui/Xray 提供的 WARP 出口：
+  1. 仅 IPv4（IPv6-only VPS 补 IPv4；也适合替换“送中”IPv4）
+  2. 仅 IPv6（IPv4-only VPS 补 IPv6）
+  3. IPv4 + IPv6（分别生成两个强制地址族出站，并提供自动出站）
+  4. 自动（单栈补另一族，双栈提供两族）
+EOF
+    printf '请选择 [%s]：' "${default_choice}"
+    read -r input
+    case "${input:-${default_choice}}" in
+        1) EGRESS_MODE="IPV4" ;;
+        2) EGRESS_MODE="IPV6" ;;
+        3) EGRESS_MODE="DUAL" ;;
+        4) EGRESS_MODE="AUTO"; ensure_effective_egress_mode ;;
+        *) die "无效选项。" ;;
+    esac
+}
+
+set_egress_mode() {
+    require_root
+    load_config
+    detect_connectivity
+    if [[ -n "${1:-}" ]]; then
+        EGRESS_MODE="$(normalize_egress_mode "$1")"
+        [[ $# -eq 1 ]] || die "set-egress 只接受一个出口模式。"
+    else
+        ensure_effective_egress_mode
+        interactive_egress_options
+    fi
+    ensure_effective_egress_mode
+    save_config
+    render_snippets
+    ok "已切换为 $(egress_mode_label)。系统默认路由和原生出口没有变化。"
+    if command -v warp-cli >/dev/null 2>&1; then
+        test_warp 0 || warn "配置已保存，但所选出口尚未全部通过验收。"
+    fi
 }
 
 do_install() {
     require_root
     load_config
     parse_install_args "$@"
-    if (( NON_INTERACTIVE == 0 )); then
-        interactive_options
-    fi
-    NEW_INSTALL=1
     log "安装基础依赖。"
     install_base_dependencies
     detect_connectivity
+    ensure_effective_egress_mode
+    if (( NON_INTERACTIVE == 0 )); then
+        interactive_options
+    fi
+    ensure_effective_egress_mode
+    NEW_INSTALL=1
     log "安装 Cloudflare 官方稳定版 WARP 客户端。"
     install_cloudflare_repo
     ensure_registration
     apply_license "${LICENSE_KEY}"
     log "配置 Local Proxy；不会修改系统默认路由。"
-    local trace
     connect_with_fallback "${TUNNEL_PROTOCOL}" || die "WARP 代理无法连接。可改用 --protocol auto 重试。"
-    trace="${LAST_TRACE}"
-    grep -Eq '^warp=(on|plus)$' <<<"${trace}" || die "WARP 未通过 trace 验证。"
+    proxy_capabilities_ready || die "所选 WARP IPv4/IPv6 出口未通过验证。"
     save_config
     install_manager
     render_snippets
     NEW_INSTALL=0
     test_warp 0 || warn "主体已安装，但仍有验收项需要查看。请运行：sudo warp3xui test --strict"
-    ok "安装完成。3x-ui 的 SOCKS 出站填写 127.0.0.1:${PORT}。"
+    ok "安装完成：$(egress_mode_label)。原生出口和系统默认路由保持不变。"
+    log "3x-ui 示例：${CONFIG_DIR}/xray-outbounds.json"
 }
 
 do_reconnect() {
     require_root
     load_config
-    local trace
+    ensure_effective_egress_mode
     connect_with_fallback "${TUNNEL_PROTOCOL}" || die "重连失败。"
-    trace="${LAST_TRACE}"
-    grep -Eq '^warp=(on|plus)$' <<<"${trace}" || die "重连后 WARP 未开启。"
+    proxy_capabilities_ready || die "重连后所选 WARP 出口仍不可用。"
     test_warp 0 || true
 }
 
@@ -708,12 +910,13 @@ WARP for 3x-ui v${SCRIPT_VERSION}
 3. 重新连接
 4. 重建 WARP 注册
 5. 更新 Cloudflare WARP 客户端
-6. 生成 3x-ui 配置示例
-7. 更新本管理脚本
-8. 卸载
+6. 切换 IPv4/IPv6 WARP 出口
+7. 生成 3x-ui 配置示例
+8. 更新本管理脚本
+9. 卸载
 0. 退出
 EOF
-        printf '请选择 [0-8]：'
+        printf '请选择 [0-9]：'
         read -r choice || return 0
         case "${choice}" in
             1) do_install ;;
@@ -721,9 +924,10 @@ EOF
             3) do_reconnect ;;
             4) do_rotate ;;
             5) update_client ;;
-            6) render_snippets ;;
-            7) self_update ;;
-            8) do_uninstall; return 0 ;;
+            6) set_egress_mode ;;
+            7) render_snippets ;;
+            8) self_update ;;
+            9) do_uninstall; return 0 ;;
             0) return 0 ;;
             *) warn "无效选项，请重新输入。" ;;
         esac
@@ -746,6 +950,7 @@ main() {
         reconnect|restart) do_reconnect ;;
         rotate) do_rotate ;;
         update-client) update_client ;;
+        set-egress) set_egress_mode "$@" ;;
         self-update) self_update "$@" ;;
         snippets) require_root; load_config; render_snippets ;;
         uninstall) do_uninstall ;;
@@ -755,4 +960,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
