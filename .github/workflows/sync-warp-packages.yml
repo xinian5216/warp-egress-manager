@@ -70,6 +70,7 @@ jobs:
     timeout-minutes: 20
     env:
       R2_BUCKET: warp-3xui-private
+      ARCHIVE_KEEP_VERSIONS: "2"
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -91,11 +92,54 @@ jobs:
         run: |
           set -Eeuo pipefail
           endpoint="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          [[ "${ARCHIVE_KEEP_VERSIONS}" =~ ^[1-9][0-9]*$ ]]
+
+          retain_recent_archives() {
+            local codename="$1" archive_root prefixes_output prefix version delete_prefix index
+            local -a versions=()
+            [[ "${codename}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
+            archive_root="packages/cloudflare-warp/deb/${codename}/amd64/archive/"
+
+            prefixes_output="$(
+              aws s3api list-objects-v2 \
+                --bucket "${R2_BUCKET}" \
+                --prefix "${archive_root}" \
+                --delimiter / \
+                --query 'CommonPrefixes[].Prefix' \
+                --output text \
+                --endpoint-url "${endpoint}"
+            )"
+            while IFS= read -r prefix; do
+              [[ -n "${prefix}" && "${prefix}" != "None" ]] || continue
+              [[ "${prefix}" == "${archive_root}"* ]] \
+                || { echo "::error::Unexpected archive prefix: ${prefix}"; exit 1; }
+              version="${prefix#"${archive_root}"}"
+              version="${version%/}"
+              [[ "${version}" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]]
+              [[ "${prefix}" == "${archive_root}${version}/" ]] \
+                || { echo "::error::Unsafe archive prefix: ${prefix}"; exit 1; }
+              versions+=("${version}")
+            done < <(tr '\t' '\n' <<<"${prefixes_output}")
+
+            ((${#versions[@]} > ARCHIVE_KEEP_VERSIONS)) || return 0
+            mapfile -t versions < <(printf '%s\n' "${versions[@]}" | LC_ALL=C sort -Vru)
+            for ((index = ARCHIVE_KEEP_VERSIONS; index < ${#versions[@]}; index++)); do
+              version="${versions[index]}"
+              delete_prefix="${archive_root}${version}/"
+              [[ "${delete_prefix}" == "packages/cloudflare-warp/deb/${codename}/amd64/archive/${version}/" ]]
+              echo "Removing expired archive: ${codename} ${version}"
+              aws s3 rm "s3://${R2_BUCKET}/${delete_prefix}" \
+                --recursive \
+                --endpoint-url "${endpoint}" \
+                --only-show-errors
+            done
+          }
+
           for artifact_dir in output/cloudflare-warp-*-amd64; do
             codename="${artifact_dir#output/cloudflare-warp-}"
             codename="${codename%-amd64}"
             version="$(tr -d '[:space:]' < "${artifact_dir}/version")"
-            [[ "${codename}" =~ ^[a-z0-9._-]+$ ]]
+            [[ "${codename}" =~ ^[a-z0-9][a-z0-9-]*$ ]]
             [[ "${version}" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]]
             latest="packages/cloudflare-warp/deb/${codename}/amd64/latest"
             archive="packages/cloudflare-warp/deb/${codename}/amd64/archive/${version}"
@@ -119,5 +163,6 @@ jobs:
             aws s3api head-object --bucket "${R2_BUCKET}" \
               --key "${latest}/cloudflare-warp.deb" \
               --endpoint-url "${endpoint}" >/dev/null
+            retain_recent_archives "${codename}"
             echo "Published ${codename} ${version}"
           done

@@ -29,6 +29,7 @@ grep -Fq 'releases/warpm/warpm.sha256' "${script}"
 grep -Fq 'releases/warpm/warpm.sha256' "${bootstrap}"
 grep -Fq 'PROJECT_ID="warp-egress-manager"' "${script}"
 grep -Fq 'LEGACY_PROJECT_ID="warp-3xui-safe"' "${script}"
+grep -Fq 'UPDATE_REPO="xinian5216/warp-egress-manager"' "${script}"
 grep -Fq '/usr/local/sbin/warpm' "${script}"
 grep -Fq 'run_via_warp' "${script}"
 grep -Fq 'curl_via_warp' "${script}"
@@ -43,6 +44,14 @@ grep -Fq 'install_cloudflare_from_r2' "${script}"
 grep -Fq 'packages/cloudflare-warp/deb' "${script}"
 grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'ARCHIVE_KEEP_VERSIONS: "2"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/${delete_prefix}"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+if grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/packages/cloudflare-warp"' \
+    "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
+    echo "Broad R2 package deletion found" >&2
+    exit 1
+fi
 
 menu_runner=(bash "${script}")
 if (( EUID != 0 )); then

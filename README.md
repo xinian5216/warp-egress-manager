@@ -91,12 +91,13 @@ packages/cloudflare-warp/deb/<codename>/amd64/latest/
 packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/
 ```
 
-`latest` 供脚本自动兜底，`archive` 保留具体版本以便回退。也可以在 GitHub Actions 中手动
-运行 **Sync official WARP packages to R2** 立即同步。R2 包兜底目前只覆盖 Debian/Ubuntu
-amd64；其他系统或架构仍走 Cloudflare 官方软件源。
+`latest` 供脚本自动兜底并在每次同步时原位覆盖；`archive` 为每个系统代号保留最近 2 个
+具体版本以便回退，更旧版本会在成功发布并校验最新版后删除。也可以在 GitHub Actions 中
+手动运行 **Sync official WARP packages to R2** 立即同步。R2 包兜底目前只覆盖
+Debian/Ubuntu amd64；其他系统或架构仍走 Cloudflare 官方软件源。
 
 先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
-写入”权限的 R2 API Token。把新凭据配置到 `warp-3xui-safe` 仓库：
+写入”权限的 R2 API Token。把新凭据配置到 `warp-egress-manager` 仓库：
 
 - Variable：`CLOUDFLARE_ACCOUNT_ID`
 - Secrets：`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
@@ -143,7 +144,7 @@ curl -6I \
 ```bash
 gh auth login
 gh api -H 'Accept: application/vnd.github.raw+json' \
-  'repos/xinian5216/warp-3xui-safe/contents/warp-3xui.sh?ref=main' \
+  'repos/xinian5216/warp-egress-manager/contents/warp-3xui.sh?ref=main' \
   > /tmp/warp-3xui.sh
 sudo bash /tmp/warp-3xui.sh
 ```
@@ -162,7 +163,7 @@ sudo bash warp-3xui.sh install \
   --port 40000 \
   --protocol auto \
   --egress auto \
-  --repo xinian5216/warp-3xui-safe \
+  --repo xinian5216/warp-egress-manager \
   --non-interactive
 ```
 
@@ -334,7 +335,7 @@ sudo warpm update-client
 sudo warpm set-egress ipv4
 sudo warpm set-egress ipv6
 sudo warpm set-egress dual
-sudo warpm self-update --repo xinian5216/warp-3xui-safe
+sudo warpm self-update --repo xinian5216/warp-egress-manager
 sudo warpm integrations
 sudo warpm uninstall
 ```
@@ -358,7 +359,8 @@ sudo warpm uninstall
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
 - WARP 客户端始终取自 Cloudflare 官方软件源；R2 只保存经官方索引 SHA256 验证的原包，
-  每周同步最新版并保留版本化归档；
+  每周同步最新版，并为每个系统代号保留最近 2 个版本化归档；固定的 `latest` 路径每次覆盖，
+  不会按运行次数持续新增对象；
 - GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 
