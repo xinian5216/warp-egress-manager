@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1 - 2026-08-11
+
+- 更新默认 GitHub 自更新仓库与 README 命令为 `xinian5216/warp-egress-manager`；保留旧项目标识，仅用于兼容已有安装。
+- R2 的 WARP 软件包归档改为每个系统代号保留最近 2 个版本；`latest` 固定路径继续原位覆盖，避免长期同步导致存储持续增长。
+- 归档清理只允许删除经过格式校验的 `packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/` 前缀，不会触及 `latest` 或其他项目对象。
+
 ## 1.3.0 - 2026-08-11
 
 - 项目业务名称改为 `WARP Egress Manager`，项目标识改为 `warp-egress-manager`；保留旧标识、`warp3xui` 命令、Worker、R2 桶与旧发布路径作为兼容层。
