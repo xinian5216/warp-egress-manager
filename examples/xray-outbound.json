@@ -1,8 +1,29 @@
-{
-  "tag": "warp-google",
-  "protocol": "socks",
-  "settings": {
-    "address": "127.0.0.1",
-    "port": 40000
+[
+  {
+    "tag": "warp-ipv4",
+    "protocol": "socks",
+    "settings": {
+      "address": "127.0.0.1",
+      "port": 40000
+    },
+    "targetStrategy": "ForceIPv4"
+  },
+  {
+    "tag": "warp-ipv6",
+    "protocol": "socks",
+    "settings": {
+      "address": "127.0.0.1",
+      "port": 40000
+    },
+    "targetStrategy": "ForceIPv6"
+  },
+  {
+    "tag": "warp-auto",
+    "protocol": "socks",
+    "settings": {
+      "address": "127.0.0.1",
+      "port": 40000
+    },
+    "targetStrategy": "UseIP"
   }
-}
+]

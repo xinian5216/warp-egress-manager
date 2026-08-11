@@ -1,10 +1,11 @@
-# WARP for 3x-ui（安全 Local Proxy 版）
+# WARP Egress Manager（安全、可选出口的 Local Proxy 管理器）
 
-为 IPv4-only、IPv6-only、双栈 VPS 安装 Cloudflare 官方 WARP 客户端，并只在本机
-`127.0.0.1:40000` 提供 SOCKS5 出站，供 3x-ui/Xray 按域名分流。
+为 IPv4-only、IPv6-only、双栈 VPS 安装和管理 Cloudflare 官方 WARP 客户端，并只在本机
+`127.0.0.1:40000` 提供 SOCKS5 出站。它可以直接给 `curl`、支持 `ALL_PROXY` 的程序或
+ProxyChains 使用；3x-ui/Xray 只是可选集成，不是运行前提。
 
-核心原则：**不让 WARP 接管系统 IPv4/IPv6 默认路由**。SSH、3x-ui 面板和未显式分流的
-流量继续走 VPS 原生网络。
+核心原则：**不让 WARP 接管系统 IPv4/IPv6 默认路由**。SSH、管理面板和未显式使用本地
+SOCKS5 的流量继续走 VPS 原生网络。
 
 ## 为什么选择 Local Proxy
 
@@ -30,21 +31,33 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 - systemd
 - Cloudflare 官方仓库实际提供软件包的 CPU 架构
 
-网络可以是 IPv4-only、IPv6-only 或双栈。安装时会分别探测公网 IPv4/IPv6，但不会据此
-修改默认路由。
+网络可以是 IPv4-only、IPv6-only 或双栈。安装时会分别探测原生公网 IPv4/IPv6，并让用户
+选择 WARP 出口能力：
+
+| 模式 | 生成的 Xray 出站 | 典型用途 |
+|---|---|---|
+| `ipv4` | 验证 WARP IPv4；`warpm curl` 默认 `-4` | IPv6-only 补 IPv4；替换“送中”IPv4 |
+| `ipv6` | 验证 WARP IPv6；`warpm curl` 默认 `-6` | IPv4-only 补 IPv6 |
+| `dual` | `warp-ipv4`、`warp-ipv6`、`warp-auto` | 按规则自由选择两种 WARP 地址族 |
+| `auto` | 单栈补另一族；双栈等同 `dual` | 不确定时使用 |
+
+这些是本地代理能力与 **可选的 Xray 出站**，不是给 VPS 网卡新增地址。普通 SOCKS5 应用
+通常自行选择目标地址族；严格限定地址族需要应用自身的 `-4/-6`，或使用 Xray 的
+`targetStrategy`。脚本不修改默认路由，也不会把整机流量切到 WARP。
 
 ## 快速安装
 
 ### 方式一：Cloudflare Worker + 私有 R2（纯 IPv6 首选）
 
-本项目使用独立的 Worker `warp-3xui-download` 与私有 R2 桶
-`warp-3xui-private`，不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，
-IPv4、双栈和没有 NAT64 的 IPv6-only VPS 都可以使用：
+项目业务名称已经改为 **WARP Egress Manager**。现有 Worker `warp-3xui-download` 与私有
+R2 桶 `warp-3xui-private` 暂时保留原基础设施名称，避免破坏已经部署的入口、密钥和绑定；
+它们不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，IPv4、双栈和没有
+NAT64 的 IPv6-only VPS 都可以使用：
 
 ```bash
-curl -fsSLo /tmp/warp3xui-install.sh \
+curl -fsSLo /tmp/warpm-install.sh \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh &&
-sudo bash /tmp/warp3xui-install.sh
+sudo bash /tmp/warpm-install.sh
 ```
 
 按提示输入本项目专用的 Cloudflare 安装密钥。引导脚本会：
@@ -52,12 +65,12 @@ sudo bash /tmp/warp3xui-install.sh
 1. 从 Cloudflare 边缘下载 R2 中受保护的主脚本和 SHA256；
 2. 校验 Bash 语法、项目标识和 SHA256；
 3. 安装 Cloudflare 官方 WARP 客户端并配置 Local Proxy；
-4. 把管理命令安装为 `/usr/local/sbin/warp3xui`；
+4. 把主命令安装为 `/usr/local/sbin/warpm`，同时保留 `warp3xui` 兼容入口；
 5. 记录 Cloudflare 更新通道，以后从菜单更新时仍不依赖 GitHub。
 
-> 该入口解决的是“纯 IPv6 无法获取私有 GitHub 脚本”的第一步。安装官方
-> `cloudflare-warp` 时仍需 VPS 能通过 IPv6 访问系统软件源和
-> `pkg.cloudflareclient.com`；它不会偷偷启用 WARP 全局路由来完成安装。
+> WARP 尚未安装时不可能借 WARP 自己完成下载。脚本会先尝试 Cloudflare 官方软件源；
+> 如果 `pkg.cloudflareclient.com` 在当前 IPv6-only 网络不可达，会自动通过同一 Worker 从
+> 私有 R2 下载经过 SHA256 校验的 Cloudflare 官方 `.deb` 包。整个过程仍不会启用全局 WARP。
 
 ### 一次性配置 R2 自动发布
 
@@ -66,8 +79,21 @@ sudo bash /tmp/warp3xui-install.sh
 | R2 对象 | 用途 |
 |---|---|
 | `public/install.sh` | 公开引导脚本 |
-| `releases/warp3xui/warp-3xui.sh` | 需要 Bearer 密钥的主脚本 |
-| `releases/warp3xui/warp-3xui.sha256` | 需要 Bearer 密钥的校验值 |
+| `releases/warpm/warpm.sh` | 需要 Bearer 密钥的主脚本 |
+| `releases/warpm/warpm.sha256` | 需要 Bearer 密钥的校验值 |
+| `releases/warp3xui/*` | 旧版安装器兼容副本 |
+
+`.github/workflows/sync-warp-packages.yml` 每周一自动读取 Cloudflare 官方 APT 索引，下载并
+核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04/26.04 的 amd64 包写入：
+
+```text
+packages/cloudflare-warp/deb/<codename>/amd64/latest/
+packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/
+```
+
+`latest` 供脚本自动兜底，`archive` 保留具体版本以便回退。也可以在 GitHub Actions 中手动
+运行 **Sync official WARP packages to R2** 立即同步。R2 包兜底目前只覆盖 Debian/Ubuntu
+amd64；其他系统或架构仍走 Cloudflare 官方软件源。
 
 先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
 写入”权限的 R2 API Token。把新凭据配置到 `warp-3xui-safe` 仓库：
@@ -92,11 +118,13 @@ sudo bash /tmp/warp3xui-install.sh
 | R2 Binding | `BUNDLES` → `warp-3xui-private`（已写入配置） |
 
 为 Worker 添加一个独立 Secret：`INSTALL_TOKEN`。它就是用户运行引导脚本时输入的安装
-密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开：
+密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开安装引导；其他对象均要求
+Bearer Token：
 
 - `/install.sh`：公开引导脚本；
-- `/releases/warp3xui/warp-3xui.sh`：Bearer Token 保护；
-- `/releases/warp3xui/warp-3xui.sha256`：Bearer Token 保护。
+- `/releases/warpm/*`：管理脚本与校验值；
+- `/releases/warp3xui/*`：旧版兼容路径；
+- `/packages/cloudflare-warp/*`：定期同步的官方软件包、校验值和版本信息。
 
 配置并完成首次发布后检查：
 
@@ -105,7 +133,7 @@ curl -6I \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh
 ```
 
-不带密钥访问 `/releases/warp3xui/warp-3xui.sh` 返回 `401` 才是正常状态。
+不带密钥访问 `/releases/warpm/warpm.sh` 返回 `401` 才是正常状态。
 
 ### 方式二：私有 GitHub 安装
 
@@ -133,6 +161,7 @@ sudo bash warp-3xui.sh
 sudo bash warp-3xui.sh install \
   --port 40000 \
   --protocol auto \
+  --egress auto \
   --repo xinian5216/warp-3xui-safe \
   --non-interactive
 ```
@@ -143,62 +172,122 @@ sudo bash warp-3xui.sh install \
 - `wireguard`：部分网络上更合适；
 - `auto`：先 MASQUE，失败再试 WireGuard。
 
-## 3x-ui 配置
+`--protocol` 决定 VPS 到 Cloudflare 使用 MASQUE 还是 WireGuard；`--egress` 决定 Xray
+把目标解析为 IPv4、IPv6 还是两者。两组选项互不替代。
+
+## 不安装 3x-ui 也能直接使用
+
+安装后先查看本地代理信息：
+
+```bash
+warpm proxy-info
+sudo warpm status
+```
+
+### 用 WARP 执行 curl
+
+```bash
+warpm curl https://www.cloudflare.com/cdn-cgi/trace
+warpm curl -4 https://www.cloudflare.com/cdn-cgi/trace
+warpm curl -6 https://www.cloudflare.com/cdn-cgi/trace
+```
+
+未显式写 `-4/-6` 时，`ipv4`、`ipv6` 模式会采用相应默认值，`dual` 模式由 curl 和 DNS
+结果选择。该命令直接把目标交给本机 WARP SOCKS5，不修改当前 Shell 或系统代理。
+
+### 让单条命令使用 WARP
+
+```bash
+warpm run -- curl https://www.cloudflare.com/cdn-cgi/trace
+warpm run -- git ls-remote https://github.com/example/example.git
+```
+
+`warpm run` 只给子进程设置 `ALL_PROXY=socks5h://127.0.0.1:40000`。程序如果不支持
+`ALL_PROXY`，不会自动经 WARP；这时使用该程序自己的 SOCKS5 设置或 ProxyChains。
+
+### 当前 Shell 临时启用
+
+```bash
+eval "$(warpm env)"
+```
+
+只对当前 Shell 及之后启动的子进程生效。关闭终端即可恢复，不会写入 `/etc/environment`、
+`.bashrc` 或系统代理。
+
+### ProxyChains
+
+脚本生成：
+
+```text
+/etc/warp-manager/proxychains.conf
+```
+
+系统已安装 `proxychains4` 时可运行：
+
+```bash
+proxychains4 -f /etc/warp-manager/proxychains.conf COMMAND
+```
+
+ProxyChains 主要代理 TCP；它也不能让一个完全不支持代理的 UDP 程序自动获得 WARP。
+
+## 可选：接入 3x-ui/Xray
 
 安装完成后运行：
 
 ```bash
-sudo warp3xui status
-sudo warp3xui snippets
+sudo warpm status
+sudo warpm integrations
 ```
 
-### 1. 添加 SOCKS 出站
+### 1. 添加所需地址族的 SOCKS 出站
 
-在 3x-ui 的“出站”中添加：
+脚本会生成三种模板；实际把所选模式对应的出站加入 3x-ui：
 
-| 字段 | 值 |
-|---|---|
-| 协议 | `socks` |
-| 标签/Tag | `warp-google` |
-| 地址 | `127.0.0.1` |
-| 端口 | `40000`（或安装时自定义端口） |
-| 用户名、密码 | 留空 |
+| Tag | `targetStrategy` | 行为 |
+|---|---|---|
+| `warp-ipv4` | `ForceIPv4` | 只允许 WARP IPv4，目标没有 A 记录就失败，不暗中回落 IPv6 |
+| `warp-ipv6` | `ForceIPv6` | 只允许 WARP IPv6，目标没有 AAAA 记录就失败，不暗中回落 IPv4 |
+| `warp-auto` | `UseIP` | 允许 Xray 在 WARP 内使用 IPv4/IPv6 |
 
-对应当前 Xray JSON：
+例如 IPv6-only VPS 补 WARP IPv4：
 
 ```json
 {
-  "tag": "warp-google",
+  "tag": "warp-ipv4",
   "protocol": "socks",
   "settings": {
     "address": "127.0.0.1",
     "port": 40000
-  }
+  },
+  "targetStrategy": "ForceIPv4"
 }
 ```
 
-### 2. 添加 Google TCP 分流
+这里的 `targetStrategy` 是 Xray 出站对象顶层字段。不要把 `ForceIPv4` 写进 `settings`。
 
-把该规则放在兜底规则之前：
+### 2. 添加按域名分流规则
+
+把规则放在兜底规则之前。下面让 Google TCP 只走 WARP IPv4：
 
 ```json
 {
   "type": "field",
   "domain": ["geosite:google"],
   "network": "tcp",
-  "outboundTag": "warp-google",
-  "ruleTag": "Google via WARP"
+  "outboundTag": "warp-ipv4",
+  "ruleTag": "Google via WARP IPv4"
 }
 ```
 
-建议路由 `domainStrategy` 保持 `AsIs`，并确保相关入站已开启域名嗅探，否则客户端只传入
-目标 IP 时，`geosite:google` 无法识别域名。
+双栈模式可按需求把其他规则指向 `warp-ipv6`，或指向 `warp-auto`。建议路由
+`domainStrategy` 保持 `AsIs`，并确保相关入站已开启域名嗅探，否则客户端只传入目标 IP
+时，`geosite:google` 无法识别域名。
 
 ### 3. 防止 QUIC 从原生 IP 泄漏
 
-Cloudflare Local Proxy 不适合承载 UDP/QUIC。只让 TCP 走 WARP、UDP 继续直连会泄漏原生
-出口，并可能继续触发 Google“送中”。建议把下面的规则放在 Google TCP 规则之后、其他
-兜底规则之前，让应用自动回退 HTTPS/TCP：
+本项目的模板只把 TCP 送入 Local Proxy。Google UDP/QUIC 若继续直连，会泄漏原生出口并
+可能继续触发“送中”。建议把下面的规则放在 Google TCP 规则之后、其他兜底规则之前，让
+应用自动回退 HTTPS/TCP：
 
 ```json
 {
@@ -210,38 +299,57 @@ Cloudflare Local Proxy 不适合承载 UDP/QUIC。只让 TCP 走 WARP、UDP 继�
 }
 ```
 
-这里假设 3x-ui 已有标签为 `blocked` 的 Blackhole 出站；没有时先创建一个 Blackhole 出站，
-或把上述标签改成你现有的阻断出站标签。
+这里假设 3x-ui 已有标签为 `blocked` 的 Blackhole 出站；没有时先创建一个，或改成你现有的
+阻断出站标签。
 
-完整示例也会写入：
+### 4. 恢复原生出口
+
+本脚本不会自动写 3x-ui 数据库。要恢复某条业务流量，删除对应 WARP 路由规则，或把它的
+`outboundTag` 改回你原有的直连 Tag 即可。系统默认路由从未被替换，因此无需修复 SSH、
+面板或网卡路由。
+
+生成文件：
 
 ```text
-/etc/warp-3xui/xray-outbound.json
-/etc/warp-3xui/xray-routing-rule-tcp.json
-/etc/warp-3xui/xray-routing-rule-udp-block.json
+/etc/warp-manager/xray-outbounds.json
+/etc/warp-manager/xray-outbound-ipv4.json
+/etc/warp-manager/xray-outbound-ipv6.json
+/etc/warp-manager/xray-outbound-auto.json
+/etc/warp-manager/xray-routing-rules.json
 ```
 
 ## 管理命令
 
 ```bash
-sudo warp3xui
-sudo warp3xui status
-sudo warp3xui test --strict
-sudo warp3xui reconnect
-sudo warp3xui rotate
-sudo warp3xui update-client
-sudo warp3xui self-update --repo xinian5216/warp-3xui-safe
-sudo warp3xui snippets
-sudo warp3xui uninstall
+sudo warpm
+sudo warpm status
+sudo warpm test --strict
+warpm proxy-info
+warpm env
+warpm run -- COMMAND
+warpm curl -4 URL
+sudo warpm reconnect
+sudo warpm rotate
+sudo warpm update-client
+sudo warpm set-egress ipv4
+sudo warpm set-egress ipv6
+sudo warpm set-egress dual
+sudo warpm self-update --repo xinian5216/warp-3xui-safe
+sudo warpm integrations
+sudo warpm uninstall
 ```
 
-直接运行 `sudo warp3xui` 会进入循环管理菜单。执行状态检查、重连、更新等操作后按
-Enter 返回主菜单，选择 `0` 才退出。
+直接运行 `sudo warpm`（root Shell 可直接输入 `warpm`）会进入循环管理菜单，可以安装、
+检查状态、切换 IPv4/IPv6 出口、查看代理用法、更新客户端或管理脚本以及卸载。每项操作
+完成后按 Enter 返回主菜单，选择 `0` 才退出。
 
-- `update-client`：通过 Cloudflare 官方 APT/YUM 仓库更新客户端，随后恢复 proxy 模式并验收。
+- `update-client`：优先通过 Cloudflare 官方 APT/YUM 仓库更新；官方源失败时在支持的平台
+  自动回退到 R2 镜像，随后恢复 proxy 模式并验收。
+- `set-egress`：只切换验收地址族并重生成 Xray 示例，不改默认路由、不重装客户端；3x-ui
+  已导入的配置仍需按新 Tag 手动调整。
 - `self-update`：自动沿用首次安装来源；Cloudflare 通道额外校验 SHA256，随后执行
   `bash -n` 与项目标识检查，再原子安装新脚本，旧版保留为
-  `/usr/local/sbin/warp3xui.bak`。
+  `/usr/local/sbin/warpm.bak`；`warp3xui` 继续作为兼容命令。
 - `rotate`：删除并重建 WARP 注册。它可能更换出口，但 WARP 不支持指定国家，不能保证修复
   Google 地区判断。
 
@@ -249,19 +357,22 @@ Enter 返回主菜单，选择 `0` 才退出。
 
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
-- 第三方客户端不打包进仓库，始终来自 Cloudflare 官方软件源；
+- WARP 客户端始终取自 Cloudflare 官方软件源；R2 只保存经官方索引 SHA256 验证的原包，
+  每周同步最新版并保留版本化归档；
 - GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 
 ## 故障排查
 
-1. `sudo warp3xui status`
-2. `sudo warp3xui test --strict`
+1. `sudo warpm status`
+2. `sudo warpm test --strict`
 3. `sudo journalctl -u warp-svc -n 100 --no-pager`
 4. MASQUE 不通时：重新安装选择 `auto` 或 `wireguard`
-5. WARP 正常但 Google 仍显示 CN：运行 `rotate` 尝试换出口；仍为 CN 时通常只能换 VPS
+5. IPv6-only 无法访问 `pkg.cloudflareclient.com`：正常情况下会自动回退 R2；若仍失败，
+   检查是否已经运行过包同步工作流、Worker Token、R2 Binding 和对应系统代号的对象
+6. WARP 正常但 Google 仍显示 CN：运行 `rotate` 尝试换出口；仍为 CN 时通常只能换 VPS
    机房/线路，WARP 本身不能选国家
-6. Google 规则不命中：确认入站 sniffing 已开启，规则在兜底规则之前，`geosite.dat` 足够新
+7. Google 规则不命中：确认入站 sniffing 已开启，规则在兜底规则之前，`geosite.dat` 足够新
 
 ## 安全说明
 
@@ -276,6 +387,7 @@ Enter 返回主菜单，选择 `0` 才退出。
 - [Cloudflare WARP 模式说明](https://developers.cloudflare.com/warp-client/warp-modes/)
 - [Cloudflare Linux 软件包仓库](https://pkg.cloudflareclient.com/)
 - [Xray SOCKS 出站文档](https://xtls.github.io/config/outbounds/socks.html)
+- [Xray 出站与 targetStrategy 文档](https://xtls.github.io/config/outbound.html)
 - [Xray 路由与 geosite 文档](https://xtls.github.io/config/routing.html)
 
 ## License

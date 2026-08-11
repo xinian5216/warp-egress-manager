@@ -3,8 +3,8 @@
     "type": "field",
     "domain": ["geosite:google"],
     "network": "tcp",
-    "outboundTag": "warp-google",
-    "ruleTag": "Google via WARP"
+    "outboundTag": "warp-ipv4",
+    "ruleTag": "Google via WARP IPv4"
   },
   {
     "type": "field",

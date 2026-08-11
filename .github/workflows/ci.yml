@@ -15,9 +15,11 @@ jobs:
       - name: Install checks
         run: sudo apt-get update && sudo apt-get install -y shellcheck jq
       - name: ShellCheck
-        run: shellcheck warp-3xui.sh cloudflare-install.sh tests/static.sh
+        run: shellcheck warp-3xui.sh cloudflare-install.sh tests/static.sh tests/modes.sh
       - name: Static tests
         run: bash tests/static.sh
+      - name: Egress mode tests
+        run: bash tests/modes.sh
 
   worker:
     runs-on: ubuntu-latest
