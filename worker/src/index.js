@@ -1,11 +1,23 @@
-const PUBLIC_ROUTES = new Map([
-  ["/install.sh", "public/install.sh"],
-]);
+const PUBLIC_ROUTES = new Map([["/install.sh", "public/install.sh"]]);
 
 const PROTECTED_ROUTES = new Map([
+  ["/releases/warpm/warpm.sh", "releases/warpm/warpm.sh"],
+  ["/releases/warpm/warpm.sha256", "releases/warpm/warpm.sha256"],
   ["/releases/warp3xui/warp-3xui.sh", "releases/warp3xui/warp-3xui.sh"],
   ["/releases/warp3xui/warp-3xui.sha256", "releases/warp3xui/warp-3xui.sha256"],
 ]);
+
+function packageObjectKey(pathname) {
+  if (!pathname.startsWith("/packages/cloudflare-warp/")) return "";
+  const objectKey = pathname.slice(1);
+  if (!/^[0-9A-Za-z._/+:~-]+$/.test(objectKey)) return "";
+  if (
+    objectKey.split("/").some((part) => !part || part === "." || part === "..")
+  ) {
+    return "";
+  }
+  return objectKey;
+}
 
 async function secureEqual(left, right) {
   if (!left || !right) return false;
@@ -54,15 +66,16 @@ export default {
 
     const pathname = new URL(request.url).pathname;
     const publicKey = PUBLIC_ROUTES.get(pathname);
-    const protectedKey = PROTECTED_ROUTES.get(pathname);
+    const protectedKey =
+      PROTECTED_ROUTES.get(pathname) || packageObjectKey(pathname);
 
     if (!publicKey && !protectedKey) {
       return textResponse("Not Found", 404);
     }
 
     if (
-      protectedKey
-      && !(await secureEqual(bearerToken(request), env.INSTALL_TOKEN))
+      protectedKey &&
+      !(await secureEqual(bearerToken(request), env.INSTALL_TOKEN))
     ) {
       return textResponse("Unauthorized", 401, {
         "www-authenticate": "Bearer",
