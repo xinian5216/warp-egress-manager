@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.2.0"
-PROJECT_ID="warp-3xui-safe"
-PROJECT_NAME="WARP Safe Manager"
+SCRIPT_VERSION="1.3.0"
+PROJECT_ID="warp-egress-manager"
+LEGACY_PROJECT_ID="warp-3xui-safe"
+PROJECT_NAME="WARP Egress Manager"
 DEFAULT_PORT="40000"
 DEFAULT_PROTOCOL="MASQUE"
 DEFAULT_EGRESS_MODE="AUTO"
@@ -17,6 +18,7 @@ MANAGER_PATH="${WARPM_MANAGER_PATH:-${WARP3XUI_MANAGER_PATH:-/usr/local/sbin/war
 LEGACY_MANAGER_PATH="/usr/local/sbin/warp3xui"
 CLOUDFLARE_BASE_DEFAULT="https://warp-3xui-download.xinian5216.workers.dev"
 LEGACY_CLOUDFLARE_BASE="https://xray-manager-download.xinian5216.workers.dev"
+WARP_PACKAGE_R2_PREFIX="packages/cloudflare-warp/deb"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 TRACE_V4_URL="https://1.1.1.1/cdn-cgi/trace"
 TRACE_V6_URL="https://[2606:4700:4700::1111]/cdn-cgi/trace"
@@ -35,6 +37,7 @@ EGRESS_MODE="${DEFAULT_EGRESS_MODE}"
 UPDATE_REPO="xinian5216/warp-3xui-safe"
 UPDATE_SOURCE="${WARPM_UPDATE_SOURCE:-${WARP3XUI_UPDATE_SOURCE:-github}}"
 CLOUDFLARE_BASE="${WARPM_CLOUDFLARE_URL:-${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}}"
+CLIENT_INSTALL_SOURCE="unknown"
 NEW_INSTALL=0
 
 log() { printf '%b\n' "${CYAN}[信息]${NC} $*"; }
@@ -62,7 +65,7 @@ trap on_error ERR
 
 usage() {
     cat <<'EOF'
-WARP Safe Manager
+WARP Egress Manager
 
 用法：
   sudo bash warp-3xui.sh                 交互菜单
@@ -75,7 +78,7 @@ WARP Safe Manager
   warpm curl [-4|-6] [CURL_ARG...]        用 WARP 执行 curl，可严格选地址族
   sudo warpm reconnect                    重新连接并验证
   sudo warpm rotate                       重建 WARP 注册并验证
-  sudo warpm update-client                更新 Cloudflare WARP 客户端
+  sudo warpm update-client                更新客户端（官方源失败时回退 R2）
   sudo warpm set-egress MODE              切换 IPv4/IPv6/双栈验收与 Xray 示例
   sudo warpm self-update [选项]           更新本管理脚本
   sudo warpm integrations                 生成通用代理与可选 3x-ui/Xray 示例
@@ -130,6 +133,7 @@ load_config() {
                 UPDATE_REPO) UPDATE_REPO="${value}" ;;
                 UPDATE_SOURCE) UPDATE_SOURCE="${value}" ;;
                 CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
+                CLIENT_INSTALL_SOURCE) CLIENT_INSTALL_SOURCE="${value}" ;;
             esac
         done < "${config_to_read}"
     elif [[ -r "${PROXY_ENV_FILE}" ]]; then
@@ -156,6 +160,19 @@ load_config() {
         github|cloudflare) ;;
         *) die "无效更新来源：${UPDATE_SOURCE}" ;;
     esac
+}
+
+normalize_arch() {
+    case "${1,,}" in
+        x86_64|amd64) printf '%s' "amd64" ;;
+        aarch64|arm64) printf '%s' "arm64" ;;
+        *) printf '%s' "${1,,}" ;;
+    esac
+}
+
+validate_codename() {
+    [[ "$1" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
+        || die "系统代号包含不安全字符：$1"
 }
 
 validate_port() {
@@ -276,8 +293,34 @@ ensure_effective_egress_mode() {
     log "自动选择：$(egress_mode_label)。原生出口不会被替换。"
 }
 
-install_cloudflare_repo() {
-    detect_os
+create_cloudflare_curl_config() {
+    local output="$1"
+    local inherited="${WARPM_AUTH_CURL_CONFIG:-}"
+    local token="${WARPM_INSTALL_TOKEN:-${WARP3XUI_INSTALL_TOKEN:-}}"
+
+    if [[ -n "${inherited}" && -r "${inherited}" ]]; then
+        cp -- "${inherited}" "${output}"
+        chmod 600 "${output}"
+        return 0
+    fi
+    if [[ -z "${token}" && -r /dev/tty ]]; then
+        printf 'Cloudflare 安装密钥（用于 R2 兜底）：' >/dev/tty
+        IFS= read -r -s token </dev/tty || true
+        printf '\n' >/dev/tty
+    fi
+    [[ -n "${token}" ]] || return 1
+    [[ "${token}" != *$'\n'* && "${token}" != *$'\r'* && "${token}" != *'"'* ]] \
+        || die "Cloudflare 安装密钥包含非法字符。"
+    {
+        printf 'header = "Authorization: Bearer %s"\n' "${token}"
+        printf '%s\n' 'fail' 'silent' 'show-error' 'location'
+        printf '%s\n' 'connect-timeout = 15' 'max-time = 300' 'retry = 3'
+    } > "${output}"
+    chmod 600 "${output}"
+    unset token WARPM_INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
+}
+
+try_install_cloudflare_repo() {
     local -a repo_probe=(--fail --silent --show-error --location --max-time 15)
     if [[ -z "${DIRECT_V4:-}" && -n "${DIRECT_V6:-}" ]]; then
         repo_probe+=(-6)
@@ -286,28 +329,91 @@ install_cloudflare_repo() {
     fi
     if ! curl "${repo_probe[@]}" https://pkg.cloudflareclient.com/pubkey.gpg \
         --output /dev/null; then
-        die "当前原生网络无法访问 Cloudflare 官方软件源。WARP 尚未安装，不能用 WARP 自举；请先提供 NAT64/临时代理，或离线上传官方 cloudflare-warp 软件包。"
+        return 1
     fi
     case "${OS_ID}" in
         debian|ubuntu)
-            [[ -n "${OS_CODENAME}" ]] || die "无法识别 Debian/Ubuntu 代号。"
+            [[ -n "${OS_CODENAME}" ]] || return 1
             curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
-                | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+                | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+                || return 1
             printf 'deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ %s main\n' \
                 "${OS_CODENAME}" > /etc/apt/sources.list.d/cloudflare-client.list
-            apt-get update
-            apt-get install -y cloudflare-warp
+            apt-get update || return 1
+            apt-get install -y cloudflare-warp || return 1
             ;;
         rhel|centos|rocky|almalinux|fedora)
             curl -fsSL https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo \
-                -o /etc/yum.repos.d/cloudflare-warp.repo
-            rpm --import https://pkg.cloudflareclient.com/pubkey.gpg
+                -o /etc/yum.repos.d/cloudflare-warp.repo || return 1
+            rpm --import https://pkg.cloudflareclient.com/pubkey.gpg || return 1
             local pm="dnf"
             command -v dnf >/dev/null 2>&1 || pm="yum"
-            "${pm}" install -y cloudflare-warp
+            "${pm}" install -y cloudflare-warp || return 1
             ;;
     esac
-    command -v warp-cli >/dev/null 2>&1 || die "cloudflare-warp 安装后仍找不到 warp-cli。"
+    command -v warp-cli >/dev/null 2>&1 || return 1
+    CLIENT_INSTALL_SOURCE="official"
+}
+
+install_cloudflare_from_r2() {
+    local arch package_base temp_dir curl_config package checksum expected actual version
+    [[ "${OS_ID}" == "debian" || "${OS_ID}" == "ubuntu" ]] || return 1
+    arch="$(normalize_arch "${ARCH}")"
+    [[ "${arch}" == "amd64" ]] || {
+        warn "R2 官方包镜像当前只同步 amd64，当前架构为 ${ARCH}。"
+        return 1
+    }
+    [[ -n "${OS_CODENAME}" ]] || return 1
+    validate_codename "${OS_CODENAME}"
+
+    temp_dir="$(mktemp -d /tmp/warpm-package.XXXXXX)"
+    curl_config="${temp_dir}/curl.conf"
+    package="${temp_dir}/cloudflare-warp.deb"
+    checksum="${temp_dir}/cloudflare-warp.sha256"
+    chmod 700 "${temp_dir}"
+    if ! create_cloudflare_curl_config "${curl_config}"; then
+        rm -rf "${temp_dir}"
+        return 1
+    fi
+
+    package_base="${CLOUDFLARE_BASE%/}/${WARP_PACKAGE_R2_PREFIX}/${OS_CODENAME}/${arch}/latest"
+    if ! curl --config "${curl_config}" "${package_base}/cloudflare-warp.deb" -o "${package}" \
+        || ! curl --config "${curl_config}" "${package_base}/cloudflare-warp.sha256" -o "${checksum}"; then
+        rm -rf "${temp_dir}"
+        return 1
+    fi
+    expected="$(tr -d '[:space:]' < "${checksum}")"
+    actual="$(sha256_file "${package}" 2>/dev/null || true)"
+    if [[ -z "${expected}" || "${expected}" != "${actual}" ]]; then
+        rm -rf "${temp_dir}"
+        warn "R2 中的 WARP 软件包 SHA256 校验失败。"
+        return 1
+    fi
+    version="$(dpkg-deb -f "${package}" Version 2>/dev/null || true)"
+    [[ -n "${version}" ]] || {
+        rm -rf "${temp_dir}"
+        return 1
+    }
+    log "正在安装 R2 镜像中的 Cloudflare 官方包 ${version}。"
+    if ! apt-get install -y "${package}"; then
+        rm -rf "${temp_dir}"
+        return 1
+    fi
+    rm -rf "${temp_dir}"
+    command -v warp-cli >/dev/null 2>&1 || return 1
+    CLIENT_INSTALL_SOURCE="r2"
+}
+
+install_cloudflare_package() {
+    detect_os
+    if try_install_cloudflare_repo; then
+        ok "已通过 Cloudflare 官方软件源安装 WARP。"
+    else
+        warn "Cloudflare 官方软件源不可用，尝试 Worker + 私有 R2 官方包镜像。"
+        install_cloudflare_from_r2 \
+            || die "官方软件源与 R2 镜像均不可用。R2 兜底仅支持已同步的 Debian/Ubuntu amd64；也可使用 NAT64、临时代理或离线官方包。"
+        ok "已通过 R2 镜像安装 Cloudflare 官方 WARP 包。"
+    fi
     systemctl enable --now warp-svc.service
 }
 
@@ -408,6 +514,7 @@ save_config() {
         printf 'UPDATE_REPO=%s\n' "${UPDATE_REPO}"
         printf 'UPDATE_SOURCE=%s\n' "${UPDATE_SOURCE}"
         printf 'CLOUDFLARE_BASE=%s\n' "${CLOUDFLARE_BASE%/}"
+        printf 'CLIENT_INSTALL_SOURCE=%s\n' "${CLIENT_INSTALL_SOURCE}"
     } > "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
     render_generic_proxy_files
@@ -699,7 +806,9 @@ show_status() {
     printf '项目标识：%s\n' "${PROJECT_ID}"
     printf '代理地址：127.0.0.1:%s\n' "${PORT}"
     printf '隧道协议：%s\n' "${TUNNEL_PROTOCOL}"
-    printf '可选出口：%s\n\n' "$(egress_mode_label)"
+    printf '可选出口：%s\n' "$(egress_mode_label)"
+    printf '客户端安装来源：%s\n' "${CLIENT_INSTALL_SOURCE}"
+    printf '旧版兼容标识：%s\n\n' "${LEGACY_PROJECT_ID}"
     if command -v warp-cli >/dev/null 2>&1; then
         warp_cli status || true
         printf '\n'
@@ -821,7 +930,7 @@ do_install() {
     ensure_effective_egress_mode
     NEW_INSTALL=1
     log "安装 Cloudflare 官方稳定版 WARP 客户端。"
-    install_cloudflare_repo
+    install_cloudflare_package
     ensure_registration
     apply_license "${LICENSE_KEY}"
     log "配置 Local Proxy；不会修改系统默认路由。"
@@ -859,19 +968,9 @@ do_rotate() {
 update_client() {
     require_root
     load_config
-    detect_os
-    case "${OS_ID}" in
-        debian|ubuntu)
-            apt-get update
-            apt-get install -y --only-upgrade cloudflare-warp
-            ;;
-        rhel|centos|rocky|almalinux|fedora)
-            local pm="dnf"
-            command -v dnf >/dev/null 2>&1 || pm="yum"
-            "${pm}" upgrade -y cloudflare-warp
-            ;;
-        *) die "不支持的系统。" ;;
-    esac
+    detect_connectivity
+    install_cloudflare_package
+    save_config
     systemctl restart warp-svc.service
     do_reconnect
 }
@@ -892,40 +991,28 @@ sha256_file() {
 }
 
 download_cloudflare_update() {
-    local output="$1" token="${WARPM_INSTALL_TOKEN:-${WARP3XUI_INSTALL_TOKEN:-}}" temp_dir curl_config checksum expected actual
+    local output="$1" temp_dir curl_config checksum expected actual script_path checksum_path
     CLOUDFLARE_BASE="${CLOUDFLARE_BASE%/}"
-    if [[ -z "${token}" && -r /dev/tty ]]; then
-        printf 'Cloudflare 安装密钥：' >/dev/tty
-        IFS= read -r -s token </dev/tty || true
-        printf '\n' >/dev/tty
-    fi
-    [[ -n "${token}" ]] || die "没有 Cloudflare 安装密钥。"
-    [[ "${token}" != *$'\n'* && "${token}" != *$'\r'* && "${token}" != *'"'* ]] \
-        || die "Cloudflare 安装密钥包含非法字符。"
-
-    temp_dir="$(mktemp -d /tmp/warp3xui-cloudflare.XXXXXX)"
+    temp_dir="$(mktemp -d /tmp/warpm-cloudflare.XXXXXX)"
     curl_config="${temp_dir}/curl.conf"
-    checksum="${temp_dir}/warp-3xui.sha256"
+    checksum="${temp_dir}/warpm.sha256"
     chmod 700 "${temp_dir}"
-    {
-        printf 'header = "Authorization: Bearer %s"\n' "${token}"
-        printf '%s\n' 'fail' 'silent' 'show-error' 'location'
-        printf '%s\n' 'connect-timeout = 15' 'max-time = 180' 'retry = 3'
-    } > "${curl_config}"
-    chmod 600 "${curl_config}"
-    unset token WARPM_INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
+    create_cloudflare_curl_config "${curl_config}" \
+        || { rm -rf "${temp_dir}"; die "没有 Cloudflare 安装密钥。"; }
 
-    if ! curl --config "${curl_config}" \
-        "${CLOUDFLARE_BASE}/releases/warp3xui/warp-3xui.sh" \
-        -o "${output}"; then
-        rm -rf "${temp_dir}"
-        die "从 Cloudflare 下载管理脚本失败。"
+    script_path="releases/warpm/warpm.sh"
+    checksum_path="releases/warpm/warpm.sha256"
+    if ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${script_path}" -o "${output}" \
+        || ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${checksum_path}" -o "${checksum}"; then
+        warn "新发布路径不可用，尝试旧版兼容路径。"
+        script_path="releases/warp3xui/warp-3xui.sh"
+        checksum_path="releases/warp3xui/warp-3xui.sha256"
     fi
-    if ! curl --config "${curl_config}" \
-        "${CLOUDFLARE_BASE}/releases/warp3xui/warp-3xui.sha256" \
-        -o "${checksum}"; then
+    if [[ ! -s "${output}" || ! -s "${checksum}" ]] \
+        && { ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${script_path}" -o "${output}" \
+            || ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${checksum_path}" -o "${checksum}"; }; then
         rm -rf "${temp_dir}"
-        die "从 Cloudflare 下载 SHA256 失败。"
+        die "从 Cloudflare 下载管理脚本或 SHA256 失败。"
     fi
 
     expected="$(tr -d '[:space:]' < "${checksum}")"
@@ -957,7 +1044,7 @@ self_update() {
             *) die "未知更新来源：${UPDATE_SOURCE}" ;;
         esac
     fi
-    temp_file="$(mktemp /tmp/warp3xui-update.XXXXXX)"
+    temp_file="$(mktemp /tmp/warpm-update.XXXXXX)"
     case "${source_type}" in
         file) cp -- "${source_value}" "${temp_file}" ;;
         url) curl -fsSL "${source_value}" -o "${temp_file}" ;;
@@ -974,7 +1061,7 @@ self_update() {
             ;;
     esac
     bash -n "${temp_file}"
-    grep -q 'PROJECT_ID="warp-3xui-safe"' "${temp_file}" || die "更新文件不是本项目脚本。"
+    grep -q 'PROJECT_ID="warp-egress-manager"' "${temp_file}" || die "更新文件不是本项目脚本。"
     new_version="$(version_from_file "${temp_file}")"
     [[ -n "${new_version}" ]] || die "无法读取新脚本版本。"
     cp -a "${MANAGER_PATH}" "${MANAGER_PATH}.bak" 2>/dev/null || true
@@ -1007,7 +1094,7 @@ remove_generated_files() {
 do_uninstall() {
     require_root
     load_config
-    printf '确认卸载 WARP Safe Manager 和 cloudflare-warp 软件包？[y/N] '
+    printf '确认卸载 WARP Egress Manager 和 cloudflare-warp 软件包？[y/N] '
     read -r answer
     [[ "${answer,,}" == "y" ]] || { log "已取消。"; return 0; }
     warp_cli disconnect >/dev/null 2>&1 || true
@@ -1038,30 +1125,32 @@ show_menu() {
     while true; do
         cat <<EOF
 
-WARP Safe Manager v${SCRIPT_VERSION}
+WARP Egress Manager v${SCRIPT_VERSION}
 1. 安装/重新配置
 2. 状态与完整验证
-3. 重新连接
-4. 重建 WARP 注册
-5. 更新 Cloudflare WARP 客户端
-6. 切换 IPv4/IPv6 WARP 出口
-7. 生成通用代理与可选 Xray/3x-ui 示例
-8. 更新本管理脚本
-9. 卸载
+3. 切换 IPv4/IPv6 WARP 出口
+4. 查看代理地址与使用示例
+5. 重新连接
+6. 重建 WARP 注册
+7. 更新 Cloudflare WARP 客户端（支持 R2 兜底）
+8. 生成通用代理与可选 Xray/3x-ui 示例
+9. 更新本管理脚本
+10. 卸载
 0. 退出
 EOF
-        printf '请选择 [0-9]：'
+        printf '请选择 [0-10]：'
         read -r choice || return 0
         case "${choice}" in
             1) do_install ;;
             2) show_status ;;
-            3) do_reconnect ;;
-            4) do_rotate ;;
-            5) update_client ;;
-            6) set_egress_mode ;;
-            7) render_integrations ;;
-            8) self_update ;;
-            9) do_uninstall; return 0 ;;
+            3) set_egress_mode ;;
+            4) show_proxy_info ;;
+            5) do_reconnect ;;
+            6) do_rotate ;;
+            7) update_client ;;
+            8) render_integrations ;;
+            9) self_update ;;
+            10) do_uninstall; return 0 ;;
             0) return 0 ;;
             *) warn "无效选项，请重新输入。" ;;
         esac
