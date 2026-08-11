@@ -25,9 +25,10 @@ if grep -Fq 'xray-manager-private' "${repo_dir}/.github/workflows/publish-r2.yml
 fi
 grep -Fq 'R2_BUCKET: warp-3xui-private' "${repo_dir}/.github/workflows/publish-r2.yml"
 grep -Fq 'public/install.sh' "${repo_dir}/.github/workflows/publish-r2.yml"
-grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${script}"
-grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${bootstrap}"
-grep -Fq 'PROJECT_ID="warp-3xui-safe"' "${script}"
+grep -Fq 'releases/warpm/warpm.sha256' "${script}"
+grep -Fq 'releases/warpm/warpm.sha256' "${bootstrap}"
+grep -Fq 'PROJECT_ID="warp-egress-manager"' "${script}"
+grep -Fq 'LEGACY_PROJECT_ID="warp-3xui-safe"' "${script}"
 grep -Fq '/usr/local/sbin/warpm' "${script}"
 grep -Fq 'run_via_warp' "${script}"
 grep -Fq 'curl_via_warp' "${script}"
@@ -38,13 +39,17 @@ grep -Fq '"targetStrategy": "${strategy}"' "${script}"
 grep -Fq 'ForceIPv4' "${script}"
 grep -Fq 'ForceIPv6' "${script}"
 grep -Fq 'set-egress' "${script}"
+grep -Fq 'install_cloudflare_from_r2' "${script}"
+grep -Fq 'packages/cloudflare-warp/deb' "${script}"
+grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 
 menu_runner=(bash "${script}")
 if (( EUID != 0 )); then
     menu_runner=(sudo -n bash "${script}")
 fi
-menu_output="$(printf '10\n\n0\n' | "${menu_runner[@]}" 2>&1)"
-[[ "$(grep -c 'WARP Safe Manager v' <<<"${menu_output}")" -eq 2 ]]
+menu_output="$(printf '99\n\n0\n' | "${menu_runner[@]}" 2>&1)"
+[[ "$(grep -c 'WARP Egress Manager v' <<<"${menu_output}")" -eq 2 ]]
 grep -q '无效选项，请重新输入' <<<"${menu_output}"
 
 if grep -Eq 'ip( -[46])? route (add|replace).*default.*(WARP|wgcf)' "${script}"; then
