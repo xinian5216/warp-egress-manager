@@ -19,7 +19,11 @@ grep -Fq 'UPDATE_SOURCE="cloudflare"' "${script}"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${script}"
 grep -Fq '/releases/warp3xui/warp-3xui.sha256' "${bootstrap}"
 
-menu_output="$(printf '9\n\n0\n' | bash "${script}" 2>&1)"
+menu_runner=(bash "${script}")
+if (( EUID != 0 )); then
+    menu_runner=(sudo -n bash "${script}")
+fi
+menu_output="$(printf '9\n\n0\n' | "${menu_runner[@]}" 2>&1)"
 [[ "$(grep -c 'WARP for 3x-ui v' <<<"${menu_output}")" -eq 2 ]]
 grep -q '无效选项，请重新输入' <<<"${menu_output}"
 
