@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 PROJECT_NAME="warp-3xui-safe"
 DEFAULT_PORT="40000"
 DEFAULT_PROTOCOL="MASQUE"
 CONFIG_DIR="/etc/warp-3xui"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 MANAGER_PATH="/usr/local/sbin/warp3xui"
+CLOUDFLARE_BASE_DEFAULT="https://xray-manager-download.xinian5216.workers.dev"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 GOOGLE_TEST_URL="https://www.google.com/generate_204"
 YOUTUBE_REGION_URL="https://www.youtube.com/premium"
@@ -21,6 +22,8 @@ NC='\033[0m'
 PORT="${DEFAULT_PORT}"
 TUNNEL_PROTOCOL="${DEFAULT_PROTOCOL}"
 UPDATE_REPO="xinian5216/warp-3xui-safe"
+UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE:-github}"
+CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}"
 NEW_INSTALL=0
 LAST_TRACE=""
 
@@ -75,6 +78,8 @@ self-update 选项：
   --file PATH             从本地脚本文件更新
   --url HTTPS_URL         从 URL 更新（私有仓库 URL 需要自行鉴权）
   --repo OWNER/REPO       使用已登录的 gh 从私有仓库更新
+  --cloudflare            从 Cloudflare Worker + 私有 R2 更新
+  --github                从已登录的 gh 更新
 
 安全保证：
   本脚本只启用 127.0.0.1 上的 WARP Local Proxy，不启用系统 WARP 模式，
@@ -99,9 +104,19 @@ load_config() {
                 PORT) PORT="${value}" ;;
                 TUNNEL_PROTOCOL) TUNNEL_PROTOCOL="${value}" ;;
                 UPDATE_REPO) UPDATE_REPO="${value}" ;;
+                UPDATE_SOURCE) UPDATE_SOURCE="${value}" ;;
+                CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
             esac
         done < "${CONFIG_FILE}"
     fi
+    [[ -z "${WARP3XUI_UPDATE_SOURCE:-}" ]] \
+        || UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE}"
+    [[ -z "${WARP3XUI_CLOUDFLARE_URL:-}" ]] \
+        || CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL}"
+    case "${UPDATE_SOURCE}" in
+        github|cloudflare) ;;
+        *) die "无效更新来源：${UPDATE_SOURCE}" ;;
+    esac
 }
 
 validate_port() {
@@ -292,6 +307,8 @@ save_config() {
         printf 'PORT=%s\n' "${PORT}"
         printf 'TUNNEL_PROTOCOL=%s\n' "${TUNNEL_PROTOCOL}"
         printf 'UPDATE_REPO=%s\n' "${UPDATE_REPO}"
+        printf 'UPDATE_SOURCE=%s\n' "${UPDATE_SOURCE}"
+        printf 'CLOUDFLARE_BASE=%s\n' "${CLOUDFLARE_BASE%/}"
     } > "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
 }
@@ -543,6 +560,61 @@ version_from_file() {
     sed -nE 's/^SCRIPT_VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' "$1" | head -n1
 }
 
+sha256_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${file}" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "${file}" | awk '{print $NF}'
+    else
+        return 1
+    fi
+}
+
+download_cloudflare_update() {
+    local output="$1" token="${WARP3XUI_INSTALL_TOKEN:-}" temp_dir curl_config checksum expected actual
+    CLOUDFLARE_BASE="${CLOUDFLARE_BASE%/}"
+    if [[ -z "${token}" && -r /dev/tty ]]; then
+        printf 'Cloudflare 安装密钥：' >/dev/tty
+        IFS= read -r -s token </dev/tty || true
+        printf '\n' >/dev/tty
+    fi
+    [[ -n "${token}" ]] || die "没有 Cloudflare 安装密钥。"
+    [[ "${token}" != *$'\n'* && "${token}" != *$'\r'* && "${token}" != *'"'* ]] \
+        || die "Cloudflare 安装密钥包含非法字符。"
+
+    temp_dir="$(mktemp -d /tmp/warp3xui-cloudflare.XXXXXX)"
+    curl_config="${temp_dir}/curl.conf"
+    checksum="${temp_dir}/warp-3xui.sha256"
+    chmod 700 "${temp_dir}"
+    {
+        printf 'header = "Authorization: Bearer %s"\n' "${token}"
+        printf '%s\n' 'fail' 'silent' 'show-error' 'location'
+        printf '%s\n' 'connect-timeout = 15' 'max-time = 180' 'retry = 3'
+    } > "${curl_config}"
+    chmod 600 "${curl_config}"
+    unset token WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
+
+    if ! curl --config "${curl_config}" \
+        "${CLOUDFLARE_BASE}/releases/warp3xui/warp-3xui.sh" \
+        -o "${output}"; then
+        rm -rf "${temp_dir}"
+        die "从 Cloudflare 下载管理脚本失败。"
+    fi
+    if ! curl --config "${curl_config}" \
+        "${CLOUDFLARE_BASE}/releases/warp3xui/warp-3xui.sha256" \
+        -o "${checksum}"; then
+        rm -rf "${temp_dir}"
+        die "从 Cloudflare 下载 SHA256 失败。"
+    fi
+
+    expected="$(tr -d '[:space:]' < "${checksum}")"
+    actual="$(sha256_file "${output}" 2>/dev/null || true)"
+    rm -rf "${temp_dir}"
+    [[ -n "${expected}" && "${expected}" == "${actual}" ]] \
+        || die "Cloudflare 更新文件 SHA256 校验失败。"
+}
+
 self_update() {
     require_root
     load_config
@@ -553,12 +625,17 @@ self_update() {
                 [[ $# -ge 2 ]] || die "$1 缺少值"
                 source_type="${1#--}"; source_value="$2"; shift 2
                 ;;
+            --cloudflare) source_type="cloudflare"; shift ;;
+            --github) source_type="repo"; source_value="${UPDATE_REPO}"; shift ;;
             *) die "未知 self-update 选项：$1" ;;
         esac
     done
     if [[ -z "${source_type}" ]]; then
-        source_type="repo"
-        source_value="${UPDATE_REPO}"
+        case "${UPDATE_SOURCE}" in
+            cloudflare) source_type="cloudflare" ;;
+            github) source_type="repo"; source_value="${UPDATE_REPO}" ;;
+            *) die "未知更新来源：${UPDATE_SOURCE}" ;;
+        esac
     fi
     temp_file="$(mktemp /tmp/warp3xui-update.XXXXXX)"
     case "${source_type}" in
@@ -569,6 +646,11 @@ self_update() {
             gh api -H 'Accept: application/vnd.github.raw+json' \
                 "repos/${source_value}/contents/warp-3xui.sh?ref=main" > "${temp_file}"
             UPDATE_REPO="${source_value}"
+            UPDATE_SOURCE="github"
+            ;;
+        cloudflare)
+            download_cloudflare_update "${temp_file}"
+            UPDATE_SOURCE="cloudflare"
             ;;
     esac
     bash -n "${temp_file}"
@@ -612,7 +694,9 @@ do_uninstall() {
 show_menu() {
     require_root
     load_config
-    cat <<EOF
+    local choice
+    while true; do
+        cat <<EOF
 
 WARP for 3x-ui v${SCRIPT_VERSION}
 1. 安装/重新配置
@@ -625,20 +709,23 @@ WARP for 3x-ui v${SCRIPT_VERSION}
 8. 卸载
 0. 退出
 EOF
-    printf '请选择 [0-8]：'
-    read -r choice
-    case "${choice}" in
-        1) do_install ;;
-        2) show_status ;;
-        3) do_reconnect ;;
-        4) do_rotate ;;
-        5) update_client ;;
-        6) render_snippets ;;
-        7) self_update ;;
-        8) do_uninstall ;;
-        0) return 0 ;;
-        *) die "无效选项。" ;;
-    esac
+        printf '请选择 [0-8]：'
+        read -r choice || return 0
+        case "${choice}" in
+            1) do_install ;;
+            2) show_status ;;
+            3) do_reconnect ;;
+            4) do_rotate ;;
+            5) update_client ;;
+            6) render_snippets ;;
+            7) self_update ;;
+            8) do_uninstall; return 0 ;;
+            0) return 0 ;;
+            *) warn "无效选项，请重新输入。" ;;
+        esac
+        printf '\n按 Enter 返回主菜单……'
+        read -r _ || return 0
+    done
 }
 
 main() {
