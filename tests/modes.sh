@@ -2,10 +2,10 @@
 set -Eeuo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-test_dir="$(mktemp -d /tmp/warp3xui-modes.XXXXXX)"
+test_dir="$(mktemp -d /tmp/warpm-modes.XXXXXX)"
 trap 'rm -rf "${test_dir}"' EXIT
 
-export WARP3XUI_CONFIG_DIR="${test_dir}/config"
+export WARPM_CONFIG_DIR="${test_dir}/config"
 # Source path is resolved from the repository at runtime.
 # shellcheck disable=SC1091
 source "${repo_dir}/warp-3xui.sh"
@@ -45,7 +45,11 @@ assert_equal "${EGRESS_MODE}" "DUAL"
 # shellcheck disable=SC2034
 PORT="40000"
 EGRESS_MODE="DUAL"
-render_snippets >/dev/null
+save_config
+render_integrations >/dev/null
+jq -e '. == 40000' <(awk -F= '$1 == "WARP_PROXY_PORT" {print $2}' "${PROXY_ENV_FILE}") >/dev/null
+grep -Fq 'socks5 127.0.0.1 40000' "${PROXYCHAINS_FILE}"
+print_proxy_env | grep -Fq "ALL_PROXY='socks5h://127.0.0.1:40000'"
 jq -e 'length == 3' "${CONFIG_DIR}/xray-outbounds.json" >/dev/null
 jq -e 'map(.targetStrategy) == ["ForceIPv4", "ForceIPv6", "UseIP"]' \
     "${CONFIG_DIR}/xray-outbounds.json" >/dev/null
