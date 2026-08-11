@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 - 2026-08-11
+
+- 项目业务名称改为 `WARP Egress Manager`，项目标识改为 `warp-egress-manager`；保留旧标识、`warp3xui` 命令、Worker、R2 桶与旧发布路径作为兼容层。
+- `warpm` 无参数运行时提供重新整理后的循环管理菜单，覆盖安装、状态、出口切换、代理用法、重连、注册、客户端更新、集成生成、脚本更新和卸载。
+- 修复交互式出口选择重复读取一次输入的问题。
+- 安装和更新客户端时优先使用 Cloudflare 官方 APT/YUM 软件源；失败后在 Debian/Ubuntu amd64 上自动回退 Worker + 私有 R2。
+- 新增每周 WARP 官方 `.deb` 包同步工作流，按 Cloudflare 官方索引 SHA256 验证，并同时维护 `latest` 与版本化 `archive` 对象。
+- Worker 新增受 Bearer Token 保护的 `/packages/cloudflare-warp/*` 路由；管理脚本与旧版发布路径继续兼容。
+- 状态页显示客户端来自官方软件源还是 R2 镜像。
+
 ## 1.2.0 - 2026-08-11
 
 - 项目定位升级为通用 `WARP Safe Manager`；主命令改为 `warpm`，并保留 `warp3xui` 兼容入口。
