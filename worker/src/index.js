@@ -1,5 +1,10 @@
 const PUBLIC_ROUTES = new Map([["/install.sh", "public/install.sh"]]);
 
+const PACKAGE_LAYOUT = "archive-pointer-v1";
+const PACKAGE_VERSION_PATTERN = /^[0-9][0-9A-Za-z.+:~-]*$/;
+const LATEST_PACKAGE_PATTERN =
+  /^(packages\/cloudflare-warp\/deb\/[a-z0-9][a-z0-9-]*\/amd64)\/latest\/(cloudflare-warp\.(?:deb|sha256))$/;
+
 const PROTECTED_ROUTES = new Map([
   ["/releases/warpm/warpm.sh", "releases/warpm/warpm.sh"],
   ["/releases/warpm/warpm.sha256", "releases/warpm/warpm.sha256"],
@@ -58,6 +63,30 @@ function bearerToken(request) {
     : "";
 }
 
+async function getBundleObject(env, objectKey) {
+  const latestMatch = objectKey.match(LATEST_PACKAGE_PATTERN);
+  if (!latestMatch) return env.BUNDLES.get(objectKey);
+
+  const [, platformRoot, filename] = latestMatch;
+  const versionKey = `${platformRoot}/latest/version`;
+
+  try {
+    const versionObject = await env.BUNDLES.get(versionKey);
+    if (versionObject && versionObject.size <= 128) {
+      const version = (await versionObject.text()).trim();
+      if (PACKAGE_VERSION_PATTERN.test(version)) {
+        const archiveKey = `${platformRoot}/archive/${version}/${filename}`;
+        const archiveObject = await env.BUNDLES.get(archiveKey);
+        if (archiveObject) return archiveObject;
+      }
+    }
+  } catch {
+    // During migration, keep serving the former direct latest object if present.
+  }
+
+  return env.BUNDLES.get(objectKey);
+}
+
 export default {
   async fetch(request, env) {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -83,7 +112,7 @@ export default {
     }
 
     const objectKey = publicKey || protectedKey;
-    const object = await env.BUNDLES.get(objectKey);
+    const object = await getBundleObject(env, objectKey);
 
     if (!object) {
       return textResponse("Object Not Found", 404);
@@ -94,6 +123,7 @@ export default {
     headers.set("etag", object.httpEtag);
     headers.set("content-length", String(object.size));
     headers.set("x-content-type-options", "nosniff");
+    headers.set("x-warpm-package-layout", PACKAGE_LAYOUT);
     headers.set(
       "cache-control",
       publicKey ? "public, max-age=300" : "private, no-store",

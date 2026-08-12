@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 PROJECT_ID="warp-egress-manager"
 LEGACY_PROJECT_ID="warp-3xui-safe"
 PROJECT_NAME="WARP Egress Manager"

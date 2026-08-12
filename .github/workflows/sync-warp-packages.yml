@@ -71,6 +71,7 @@ jobs:
     env:
       R2_BUCKET: warp-3xui-private
       ARCHIVE_KEEP_VERSIONS: "2"
+      WORKER_BASE_URL: https://warp-3xui-download.xinian5216.workers.dev
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -87,7 +88,7 @@ jobs:
         with:
           pattern: cloudflare-warp-*-amd64
           path: output
-      - name: Publish latest and versioned archives
+      - name: Publish versioned archives and latest pointers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -143,26 +144,75 @@ jobs:
             [[ "${version}" =~ ^[0-9][0-9A-Za-z.+:~-]*$ ]]
             latest="packages/cloudflare-warp/deb/${codename}/amd64/latest"
             archive="packages/cloudflare-warp/deb/${codename}/amd64/archive/${version}"
-            for prefix in "${latest}" "${archive}"; do
-              aws s3 cp "${artifact_dir}/cloudflare-warp.deb" \
-                "s3://${R2_BUCKET}/${prefix}/cloudflare-warp.deb" \
-                --endpoint-url "${endpoint}" \
-                --content-type application/vnd.debian.binary-package \
-                --cache-control private,no-store --only-show-errors
-              aws s3 cp "${artifact_dir}/cloudflare-warp.sha256" \
-                "s3://${R2_BUCKET}/${prefix}/cloudflare-warp.sha256" \
-                --endpoint-url "${endpoint}" \
-                --content-type "text/plain; charset=utf-8" \
-                --cache-control private,no-store --only-show-errors
-              aws s3 cp "${artifact_dir}/version" \
-                "s3://${R2_BUCKET}/${prefix}/version" \
-                --endpoint-url "${endpoint}" \
-                --content-type "text/plain; charset=utf-8" \
-                --cache-control private,no-store --only-show-errors
-            done
+            aws s3 cp "${artifact_dir}/cloudflare-warp.deb" \
+              "s3://${R2_BUCKET}/${archive}/cloudflare-warp.deb" \
+              --endpoint-url "${endpoint}" \
+              --content-type application/vnd.debian.binary-package \
+              --cache-control private,no-store --only-show-errors
+            aws s3 cp "${artifact_dir}/cloudflare-warp.sha256" \
+              "s3://${R2_BUCKET}/${archive}/cloudflare-warp.sha256" \
+              --endpoint-url "${endpoint}" \
+              --content-type "text/plain; charset=utf-8" \
+              --cache-control private,no-store --only-show-errors
+            aws s3 cp "${artifact_dir}/version" \
+              "s3://${R2_BUCKET}/${archive}/version" \
+              --endpoint-url "${endpoint}" \
+              --content-type "text/plain; charset=utf-8" \
+              --cache-control private,no-store --only-show-errors
+
+            # Update the tiny pointer only after the immutable archive is complete.
+            aws s3 cp "${artifact_dir}/version" \
+              "s3://${R2_BUCKET}/${latest}/version" \
+              --endpoint-url "${endpoint}" \
+              --content-type "text/plain; charset=utf-8" \
+              --cache-control private,no-store --only-show-errors
             aws s3api head-object --bucket "${R2_BUCKET}" \
-              --key "${latest}/cloudflare-warp.deb" \
+              --key "${archive}/cloudflare-warp.deb" \
               --endpoint-url "${endpoint}" >/dev/null
+            published_version="$(
+              aws s3 cp "s3://${R2_BUCKET}/${latest}/version" - \
+                --endpoint-url "${endpoint}" \
+                --only-show-errors | tr -d '[:space:]'
+            )"
+            [[ "${published_version}" == "${version}" ]] \
+              || { echo "::error::Latest pointer mismatch for ${codename}"; exit 1; }
             retain_recent_archives "${codename}"
             echo "Published ${codename} ${version}"
+          done
+
+      - name: Remove redundant latest package copies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          endpoint="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          layout_ready=0
+
+          # Worker and Actions deploy independently. Keep compatibility copies
+          # until the live Worker confirms it can follow latest/version.
+          for attempt in {1..18}; do
+            if curl --fail --silent --show-error --location --head \
+                --max-time 15 "${WORKER_BASE_URL%/}/install.sh" \
+                | tr -d '\r' \
+                | grep -Fqx 'x-warpm-package-layout: archive-pointer-v1'; then
+              layout_ready=1
+              break
+            fi
+            (( attempt == 18 )) || sleep 10
+          done
+
+          if (( layout_ready == 0 )); then
+            echo "::warning::Worker pointer layout is not live yet; keeping redundant latest packages for compatibility. A later scheduled or manual run will remove them."
+            exit 0
+          fi
+
+          for codename in bookworm trixie jammy noble resolute; do
+            latest="packages/cloudflare-warp/deb/${codename}/amd64/latest"
+            for filename in cloudflare-warp.deb cloudflare-warp.sha256; do
+              key="${latest}/${filename}"
+              [[ "${key}" == "packages/cloudflare-warp/deb/${codename}/amd64/latest/${filename}" ]]
+              aws s3 rm "s3://${R2_BUCKET}/${key}" \
+                --endpoint-url "${endpoint}" \
+                --only-show-errors
+            done
+            echo "Removed redundant latest package copy: ${codename}"
           done
