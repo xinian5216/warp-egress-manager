@@ -87,14 +87,18 @@ sudo bash /tmp/warpm-install.sh
 核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04/26.04 的 amd64 包写入：
 
 ```text
-packages/cloudflare-warp/deb/<codename>/amd64/latest/
-packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/
+packages/cloudflare-warp/deb/<codename>/amd64/latest/version
+packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/cloudflare-warp.deb
 ```
 
-`latest` 供脚本自动兜底并在每次同步时原位覆盖；`archive` 为每个系统代号保留最近 2 个
-具体版本以便回退，更旧版本会在成功发布并校验最新版后删除。也可以在 GitHub Actions 中
-手动运行 **Sync official WARP packages to R2** 立即同步。R2 包兜底目前只覆盖
-Debian/Ubuntu amd64；其他系统或架构仍走 Cloudflare 官方软件源。
+`latest/version` 只是一个很小的版本指针；Worker 会在内部把现有的 `latest/*.deb` 下载地址
+解析到相应的版本化归档，因此已有管理脚本无需改变。`.deb` 实体不会再同时复制到
+`latest` 和 `archive`。`archive` 为每个系统代号保留当前版和前一版共 2 个具体版本以便
+回退，更旧版本会在成功发布并校验最新版后删除。工作流只有在确认新版 Worker 已上线后，
+才会删除旧布局中的 `latest` 软件包副本，避免 GitHub Actions 与 Worker 独立部署造成短暂
+下载中断。也可以在 GitHub Actions 中手动运行 **Sync official WARP packages to R2** 立即
+同步和清理。R2 包兜底目前只覆盖 Debian/Ubuntu amd64；其他系统或架构仍走 Cloudflare
+官方软件源。
 
 先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
 写入”权限的 R2 API Token。把新凭据配置到 `warp-egress-manager` 仓库：
@@ -359,8 +363,8 @@ sudo warpm uninstall
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
 - WARP 客户端始终取自 Cloudflare 官方软件源；R2 只保存经官方索引 SHA256 验证的原包，
-  每周同步最新版，并为每个系统代号保留最近 2 个版本化归档；固定的 `latest` 路径每次覆盖，
-  不会按运行次数持续新增对象；
+  每周同步最新版，并为每个系统代号保留最近 2 个版本化归档；`latest` 只保存版本指针，
+  不再重复存放 `.deb`，也不会按运行次数持续新增对象；
 - GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 

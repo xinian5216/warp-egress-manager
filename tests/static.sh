@@ -46,6 +46,16 @@ grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'ARCHIVE_KEEP_VERSIONS: "2"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'x-warpm-package-layout: archive-pointer-v1' \
+    "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'latest}/version' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+# Match the literal workflow variables, not shell-expanded values.
+# shellcheck disable=SC2016
+if grep -Fq '"s3://${R2_BUCKET}/${latest}/cloudflare-warp.deb"' \
+    "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
+    echo "Redundant latest package upload found" >&2
+    exit 1
+fi
 # Match the literal workflow variables, not shell-expanded values.
 # shellcheck disable=SC2016
 grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/${delete_prefix}"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
