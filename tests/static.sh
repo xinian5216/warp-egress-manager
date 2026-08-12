@@ -49,6 +49,8 @@ grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packa
 grep -Fq 'x-warpm-package-layout: archive-pointer-v1' \
     "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'latest}/version' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+# Match the literal workflow variables, not shell-expanded values.
+# shellcheck disable=SC2016
 if grep -Fq '"s3://${R2_BUCKET}/${latest}/cloudflare-warp.deb"' \
     "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
     echo "Redundant latest package upload found" >&2
