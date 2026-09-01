@@ -33,11 +33,23 @@ function request(path, options = {}) {
   return new Request(`https://warp-3xui-download.example${path}`, options);
 }
 
-test("serves the public bootstrap without authorization", async () => {
+test("rejects the bootstrap without authorization", async () => {
   const result = await worker.fetch(request("/install.sh"), env);
+  assert.equal(result.status, 401);
+  assert.equal(result.headers.get("www-authenticate"), "Bearer");
+  assert.equal(result.headers.get("cache-control"), "no-store");
+});
+
+test("serves the authenticated bootstrap without public caching", async () => {
+  const result = await worker.fetch(
+    request("/install.sh", {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+    env,
+  );
   assert.equal(result.status, 200);
   assert.match(await result.text(), /echo install/);
-  assert.equal(result.headers.get("cache-control"), "public, max-age=300");
+  assert.equal(result.headers.get("cache-control"), "private, no-store");
 });
 
 test("rejects a protected object without the dedicated token", async () => {
@@ -63,7 +75,10 @@ test("serves a protected object with the dedicated token", async () => {
 
 test("HEAD returns metadata without a body", async () => {
   const result = await worker.fetch(
-    request("/install.sh", { method: "HEAD" }),
+    request("/install.sh", {
+      method: "HEAD",
+      headers: { Authorization: `Bearer ${token}` },
+    }),
     env,
   );
   assert.equal(result.status, 200);

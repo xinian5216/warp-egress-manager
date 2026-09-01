@@ -16,8 +16,11 @@ for command_name in curl bash; do
     fi
 done
 
-read -rsp "安装密钥: " INSTALL_TOKEN </dev/tty
-echo
+INSTALL_TOKEN="${WARPM_INSTALL_TOKEN:-${WARP3XUI_INSTALL_TOKEN:-}}"
+if [[ -z "${INSTALL_TOKEN}" ]]; then
+    read -rsp "安装密钥: " INSTALL_TOKEN </dev/tty
+    echo
+fi
 [[ -n "${INSTALL_TOKEN}" ]] || { echo "安装密钥不能为空"; exit 1; }
 [[ "${INSTALL_TOKEN}" != *$'\n'* && "${INSTALL_TOKEN}" != *$'\r'* && "${INSTALL_TOKEN}" != *'"'* ]] \
     || { echo "安装密钥包含非法字符"; exit 1; }
