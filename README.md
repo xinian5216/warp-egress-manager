@@ -84,7 +84,7 @@ sudo bash /tmp/warpm-install.sh
 | `releases/warp3xui/*` | 旧版安装器兼容副本 |
 
 `.github/workflows/sync-warp-packages.yml` 每周一自动读取 Cloudflare 官方 APT 索引，下载并
-核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04/26.04 的 amd64 包写入：
+核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04 的 amd64 包写入：
 
 ```text
 packages/cloudflare-warp/deb/<codename>/amd64/latest/version

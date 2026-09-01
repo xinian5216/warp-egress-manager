@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- R2 官方包同步只保留 Debian 12/13（bookworm/trixie）和 Ubuntu 22.04/24.04（jammy/noble），不再同步 Ubuntu 26.04（resolute）。未同步代号仍走 Cloudflare 官方软件源。
+- 同步工作流在结束后删除本 run 的 GitHub Actions artifact，避免过期制品占满私有仓库账号配额。
+
 ## 1.3.2 - 2026-08-11
 
 - R2 的 `latest` 改为只保存版本指针，WARP `.deb` 与 SHA256 实体只写入版本化归档，消除每个系统代号的一份完整重复包。
