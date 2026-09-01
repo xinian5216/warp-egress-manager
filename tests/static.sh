@@ -46,6 +46,11 @@ grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'ARCHIVE_KEEP_VERSIONS: "2"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+grep -Fq 'cleanup-artifacts:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
+if grep -Eq '^[[:space:]]+- resolute$' "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
+    echo "Ubuntu 26.04 resolute should not be synced as a GitHub artifact" >&2
+    exit 1
+fi
 grep -Fq 'x-warpm-package-layout: archive-pointer-v1' \
     "${repo_dir}/.github/workflows/sync-warp-packages.yml"
 grep -Fq 'latest}/version' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
