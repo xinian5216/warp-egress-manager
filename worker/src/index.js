@@ -1,11 +1,10 @@
-const PUBLIC_ROUTES = new Map([["/install.sh", "public/install.sh"]]);
-
 const PACKAGE_LAYOUT = "archive-pointer-v1";
 const PACKAGE_VERSION_PATTERN = /^[0-9][0-9A-Za-z.+:~-]*$/;
 const LATEST_PACKAGE_PATTERN =
   /^(packages\/cloudflare-warp\/deb\/[a-z0-9][a-z0-9-]*\/amd64)\/latest\/(cloudflare-warp\.(?:deb|sha256))$/;
 
 const PROTECTED_ROUTES = new Map([
+  ["/install.sh", "public/install.sh"],
   ["/releases/warpm/warpm.sh", "releases/warpm/warpm.sh"],
   ["/releases/warpm/warpm.sha256", "releases/warpm/warpm.sha256"],
   ["/releases/warp3xui/warp-3xui.sh", "releases/warp3xui/warp-3xui.sh"],
@@ -94,24 +93,21 @@ export default {
     }
 
     const pathname = new URL(request.url).pathname;
-    const publicKey = PUBLIC_ROUTES.get(pathname);
+    const isInstaller = pathname === "/install.sh";
     const protectedKey =
       PROTECTED_ROUTES.get(pathname) || packageObjectKey(pathname);
 
-    if (!publicKey && !protectedKey) {
+    if (!protectedKey) {
       return textResponse("Not Found", 404);
     }
 
-    if (
-      protectedKey &&
-      !(await secureEqual(bearerToken(request), env.INSTALL_TOKEN))
-    ) {
+    if (!(await secureEqual(bearerToken(request), env.INSTALL_TOKEN))) {
       return textResponse("Unauthorized", 401, {
         "www-authenticate": "Bearer",
       });
     }
 
-    const objectKey = publicKey || protectedKey;
+    const objectKey = protectedKey;
     const object = await getBundleObject(env, objectKey);
 
     if (!object) {
@@ -124,12 +120,9 @@ export default {
     headers.set("content-length", String(object.size));
     headers.set("x-content-type-options", "nosniff");
     headers.set("x-warpm-package-layout", PACKAGE_LAYOUT);
-    headers.set(
-      "cache-control",
-      publicKey ? "public, max-age=300" : "private, no-store",
-    );
+    headers.set("cache-control", "private, no-store");
 
-    if (publicKey) {
+    if (isInstaller) {
       headers.set("content-type", "text/x-shellscript; charset=utf-8");
     } else {
       const filename = pathname.split("/").pop();
