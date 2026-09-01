@@ -55,9 +55,13 @@ R2 桶 `warp-3xui-private` 暂时保留原基础设施名称，避免破坏已�
 NAT64 的 IPv6-only VPS 都可以使用：
 
 ```bash
+read -rsp "安装密钥: " WARPM_INSTALL_TOKEN; echo
+export WARPM_INSTALL_TOKEN
 curl -fsSLo /tmp/warpm-install.sh \
+  -H "Authorization: Bearer ${WARPM_INSTALL_TOKEN}" \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh &&
-sudo bash /tmp/warpm-install.sh
+sudo -E bash /tmp/warpm-install.sh
+unset WARPM_INSTALL_TOKEN
 ```
 
 按提示输入本项目专用的 Cloudflare 安装密钥。引导脚本会：
@@ -78,7 +82,7 @@ sudo bash /tmp/warpm-install.sh
 
 | R2 对象 | 用途 |
 |---|---|
-| `public/install.sh` | 公开引导脚本 |
+| `public/install.sh` | 需要 Bearer 密钥的引导脚本 |
 | `releases/warpm/warpm.sh` | 需要 Bearer 密钥的主脚本 |
 | `releases/warpm/warpm.sha256` | 需要 Bearer 密钥的校验值 |
 | `releases/warp3xui/*` | 旧版安装器兼容副本 |
@@ -123,10 +127,9 @@ packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/cloudflare-warp.
 | R2 Binding | `BUNDLES` → `warp-3xui-private`（已写入配置） |
 
 为 Worker 添加一个独立 Secret：`INSTALL_TOKEN`。它就是用户运行引导脚本时输入的安装
-密钥，不需要、也不建议与 `xray-manager` 相同。Worker 只公开安装引导；其他对象均要求
-Bearer Token：
+密钥，不需要、也不建议与 `xray-manager` 相同。Worker 的安装引导与其他对象均要求 Bearer Token：
 
-- `/install.sh`：公开引导脚本；
+- `/install.sh`：需要 Bearer Token 的引导脚本；
 - `/releases/warpm/*`：管理脚本与校验值；
 - `/releases/warp3xui/*`：旧版兼容路径；
 - `/packages/cloudflare-warp/*`：定期同步的官方软件包、校验值和版本信息。
@@ -134,11 +137,14 @@ Bearer Token：
 配置并完成首次发布后检查：
 
 ```bash
+read -rsp "安装密钥: " WARPM_INSTALL_TOKEN; echo
 curl -6I \
+  -H "Authorization: Bearer ${WARPM_INSTALL_TOKEN}" \
   https://warp-3xui-download.xinian5216.workers.dev/install.sh
+unset WARPM_INSTALL_TOKEN
 ```
 
-不带密钥访问 `/releases/warpm/warpm.sh` 返回 `401` 才是正常状态。
+不带密钥访问 `/install.sh` 或 `/releases/warpm/warpm.sh` 返回 `401` 才是正常状态。
 
 ### 方式二：私有 GitHub 安装
 
