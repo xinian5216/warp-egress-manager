@@ -3,30 +3,18 @@ set -Eeuo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="${repo_dir}/warp-3xui.sh"
-bootstrap="${repo_dir}/cloudflare-install.sh"
 
 bash -n "${script}"
-bash -n "${bootstrap}"
 bash -n "${repo_dir}/tests/modes.sh"
 [[ "$(bash "${script}" version)" == "$(<"${repo_dir}/VERSION")" ]]
 bash "${script}" --help | grep -q 'Local Proxy'
+bash "${script}" --help | grep -q 'GitHub Proxy'
 
 if grep -Eq 'warp-cli( --accept-tos)? mode (warp|warp\+doh|tunnel_only)' "${script}"; then
     echo "Unsafe global WARP mode found" >&2
     exit 1
 fi
 
-grep -Fq 'UPDATE_SOURCE="cloudflare"' "${script}"
-grep -Fq 'warp-3xui-download.xinian5216.workers.dev' "${script}"
-grep -Fq 'warp-3xui-download.xinian5216.workers.dev' "${bootstrap}"
-if grep -Fq 'xray-manager-private' "${repo_dir}/.github/workflows/publish-r2.yml"; then
-    echo "Shared xray-manager R2 bucket found in warp publish workflow" >&2
-    exit 1
-fi
-grep -Fq 'R2_BUCKET: warp-3xui-private' "${repo_dir}/.github/workflows/publish-r2.yml"
-grep -Fq 'public/install.sh' "${repo_dir}/.github/workflows/publish-r2.yml"
-grep -Fq 'releases/warpm/warpm.sha256' "${script}"
-grep -Fq 'releases/warpm/warpm.sha256' "${bootstrap}"
 grep -Fq 'PROJECT_ID="warp-egress-manager"' "${script}"
 grep -Fq 'LEGACY_PROJECT_ID="warp-3xui-safe"' "${script}"
 grep -Fq 'UPDATE_REPO="xinian5216/warp-egress-manager"' "${script}"
@@ -40,44 +28,106 @@ grep -Fq '"targetStrategy": "${strategy}"' "${script}"
 grep -Fq 'ForceIPv4' "${script}"
 grep -Fq 'ForceIPv6' "${script}"
 grep -Fq 'set-egress' "${script}"
-grep -Fq 'install_cloudflare_from_r2' "${script}"
-grep -Fq 'packages/cloudflare-warp/deb' "${script}"
-grep -Fq 'schedule:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-grep -Fq 'cloudflare-warp.deb' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-grep -Fq 'ARCHIVE_KEEP_VERSIONS: "2"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-grep -Fq 'retain_recent_archives' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-grep -Fq 'cleanup-artifacts:' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-if grep -Eq '^[[:space:]]+- resolute$' "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
-    echo "Ubuntu 26.04 resolute should not be synced as a GitHub artifact" >&2
+grep -Fq 'github_curl()' "${script}"
+grep -Fq 'github_raw_url()' "${script}"
+grep -Fq 'raw.githubusercontent.com' "${script}"
+grep -Fq 'pkg.cloudflareclient.com' "${script}"
+if grep -Fq 'github_gh()' "${script}"; then
+    echo "github_gh should have been removed" >&2
     exit 1
 fi
-grep -Fq 'x-warpm-package-layout: archive-pointer-v1' \
-    "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-grep -Fq 'latest}/version' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-# Match the literal workflow variables, not shell-expanded values.
-# shellcheck disable=SC2016
-if grep -Fq '"s3://${R2_BUCKET}/${latest}/cloudflare-warp.deb"' \
-    "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
-    echo "Redundant latest package upload found" >&2
+if grep -Eq 'gh[[:space:]]+auth|gh[[:space:]]+api' "${script}"; then
+    echo "self-update must not require gh CLI" >&2
     exit 1
 fi
-# Match the literal workflow variables, not shell-expanded values.
+if grep -Fq 'command -v gh' "${script}"; then
+    echo "self-update must not require gh" >&2
+    exit 1
+fi
+if grep -Fq 'mktemp /tmp/warpm-update' "${script}"; then
+    echo "self-update must not stage replacements in /tmp" >&2
+    exit 1
+fi
+# Match the literal template in self_update.
 # shellcheck disable=SC2016
-grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/${delete_prefix}"' "${repo_dir}/.github/workflows/sync-warp-packages.yml"
-# shellcheck disable=SC2016
-if grep -Fq 'aws s3 rm "s3://${R2_BUCKET}/packages/cloudflare-warp"' \
-    "${repo_dir}/.github/workflows/sync-warp-packages.yml"; then
-    echo "Broad R2 package deletion found" >&2
+grep -Fq 'dirname -- "${MANAGER_PATH}"' "${script}"
+grep -Fq 'restore_manager_backup' "${script}"
+grep -Fq '.warpm-update.XXXXXX' "${script}"
+
+if awk '/^try_install_cloudflare_repo\(\)/,/^}/' "${script}" | grep -q 'github_curl'; then
+    echo "Cloudflare package install must not use github_curl" >&2
+    exit 1
+fi
+if awk '/^trace_value\(\)/,/^}/' "${script}" | grep -q 'github_curl'; then
+    echo "Cloudflare trace must not use github_curl" >&2
+    exit 1
+fi
+if awk '/^extract_youtube_region\(\)/,/^}/' "${script}" | grep -q 'github_curl'; then
+    echo "YouTube check must not use github_curl" >&2
     exit 1
 fi
 
-menu_runner=(bash "${script}")
-if (( EUID != 0 )); then
+if grep -Eq '^[[:space:]]*export[[:space:]]+(HTTP_PROXY|HTTPS_PROXY|http_proxy|https_proxy)' "${script}"; then
+    echo "Global proxy export found" >&2
+    exit 1
+fi
+if grep -Eq '>(>)?[[:space:]]*/etc/environment' "${script}"; then
+    echo "Script writes /etc/environment" >&2
+    exit 1
+fi
+if grep -Fq 'git config --global http.proxy' "${script}"; then
+    echo "Script sets git global proxy" >&2
+    exit 1
+fi
+if grep -Eq 'curl[[:space:]]+(-k|--insecure)\b' "${script}"; then
+    echo "Insecure curl found" >&2
+    exit 1
+fi
+
+assert_no_r2_worker() {
+    local file="$1" label="$2"
+    if grep -niE 'workers\.dev|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|warp-3xui-private|install_cloudflare_from_r2|download_cloudflare_update|packages/cloudflare-warp/deb|WARPM_INSTALL_TOKEN' "${file}"; then
+        echo "Forbidden R2/Worker dependency in ${label}" >&2
+        exit 1
+    fi
+}
+
+assert_no_r2_worker "${script}" "warp-3xui.sh"
+assert_no_r2_worker "${repo_dir}/README.md" "README.md"
+shopt -s nullglob
+for workflow in "${repo_dir}/.github/workflows/"*.yml "${repo_dir}/.github/workflows/"*.yaml; do
+    assert_no_r2_worker "${workflow}" "${workflow#"${repo_dir}/"}"
+done
+shopt -u nullglob
+
+if [[ -e "${repo_dir}/cloudflare-install.sh" ]]; then
+    echo "cloudflare-install.sh should have been removed" >&2
+    exit 1
+fi
+if [[ -d "${repo_dir}/worker" ]]; then
+    echo "worker/ should have been removed" >&2
+    exit 1
+fi
+if [[ -e "${repo_dir}/.github/workflows/publish-r2.yml" ]]; then
+    echo "publish-r2.yml should have been removed" >&2
+    exit 1
+fi
+if [[ -e "${repo_dir}/.github/workflows/sync-warp-packages.yml" ]]; then
+    echo "sync-warp-packages.yml should have been removed" >&2
+    exit 1
+fi
+
+menu_runner=()
+if (( EUID == 0 )); then
+    menu_runner=(bash "${script}")
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     menu_runner=(sudo -n bash "${script}")
 fi
-menu_output="$(printf '99\n\n0\n' | "${menu_runner[@]}" 2>&1)"
-[[ "$(grep -c 'WARP Egress Manager v' <<<"${menu_output}")" -eq 2 ]]
-grep -q '无效选项，请重新输入' <<<"${menu_output}"
+if ((${#menu_runner[@]})); then
+    menu_output="$(printf '99\n\n0\n' | "${menu_runner[@]}" 2>&1)"
+    [[ "$(grep -c 'WARP Egress Manager v' <<<"${menu_output}")" -eq 2 ]]
+    grep -q '无效选项，请重新输入' <<<"${menu_output}"
+fi
 
 if grep -Eq 'ip( -[46])? route (add|replace).*default.*(WARP|wgcf)' "${script}"; then
     echo "Unsafe WARP default route mutation found" >&2

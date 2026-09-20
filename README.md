@@ -22,6 +22,9 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 > 页面结构可能变化，因此地区码检查属于启发式检测，不能提取时脚本会明确写“无法断言”，
 > 不会伪报成功。
 
+Local Proxy 使用 **MASQUE**。Cloudflare Linux WARP 自 2025.8.779.0 起，Proxy 模式只支持
+MASQUE，不再支持 WireGuard。旧安装里的 `AUTO` / `WireGuard` 会在读取配置时自动迁移。
+
 ## 支持范围
 
 - Debian 12/13
@@ -47,144 +50,82 @@ Cloudflare 官方把 Local Proxy 定义为“只有显式配置代理的应用�
 
 ## 快速安装
 
-### 方式一：Cloudflare Worker + 私有 R2（纯 IPv6 首选）
+1. 获取 `warp-egress-manager`
+2. 安装 Cloudflare 官方 WARP
+3. 启用 Local Proxy
+4. 验证
+5. 可选 Xray / ProxyChains 集成
+6. 可选 GitHub Proxy（仅当 GitHub 不可达时）
 
-项目业务名称已经改为 **WARP Egress Manager**。现有 Worker `warp-3xui-download` 与私有
-R2 桶 `warp-3xui-private` 暂时保留原基础设施名称，避免破坏已经部署的入口、密钥和绑定；
-它们不会读取或覆盖 `xray-manager` 的对象。首次下载不访问 GitHub，IPv4、双栈和没有
-NAT64 的 IPv6-only VPS 都可以使用：
-
-```bash
-read -rsp "安装密钥: " WARPM_INSTALL_TOKEN; echo
-export WARPM_INSTALL_TOKEN
-curl -fsSLo /tmp/warpm-install.sh \
-  -H "Authorization: Bearer ${WARPM_INSTALL_TOKEN}" \
-  https://warp-3xui-download.xinian5216.workers.dev/install.sh &&
-sudo -E bash /tmp/warpm-install.sh
-unset WARPM_INSTALL_TOKEN
-```
-
-按提示输入本项目专用的 Cloudflare 安装密钥。引导脚本会：
-
-1. 从 Cloudflare 边缘下载 R2 中受保护的主脚本和 SHA256；
-2. 校验 Bash 语法、项目标识和 SHA256；
-3. 安装 Cloudflare 官方 WARP 客户端并配置 Local Proxy；
-4. 把主命令安装为 `/usr/local/sbin/warpm`，同时保留 `warp3xui` 兼容入口；
-5. 记录 Cloudflare 更新通道，以后从菜单更新时仍不依赖 GitHub。
-
-> WARP 尚未安装时不可能借 WARP 自己完成下载。脚本会先尝试 Cloudflare 官方软件源；
-> 如果 `pkg.cloudflareclient.com` 在当前 IPv6-only 网络不可达，会自动通过同一 Worker 从
-> 私有 R2 下载经过 SHA256 校验的 Cloudflare 官方 `.deb` 包。整个过程仍不会启用全局 WARP。
-
-### 一次性配置 R2 自动发布
-
-本仓库的 `.github/workflows/publish-r2.yml` 会在改动合并到 `main` 后上传：
-
-| R2 对象 | 用途 |
-|---|---|
-| `public/install.sh` | 需要 Bearer 密钥的引导脚本 |
-| `releases/warpm/warpm.sh` | 需要 Bearer 密钥的主脚本 |
-| `releases/warpm/warpm.sha256` | 需要 Bearer 密钥的校验值 |
-| `releases/warp3xui/*` | 旧版安装器兼容副本 |
-
-`.github/workflows/sync-warp-packages.yml` 每周一自动读取 Cloudflare 官方 APT 索引，下载并
-核对官方 SHA256，然后将 Debian 12/13、Ubuntu 22.04/24.04 的 amd64 包写入：
-
-```text
-packages/cloudflare-warp/deb/<codename>/amd64/latest/version
-packages/cloudflare-warp/deb/<codename>/amd64/archive/<version>/cloudflare-warp.deb
-```
-
-`latest/version` 只是一个很小的版本指针；Worker 会在内部把现有的 `latest/*.deb` 下载地址
-解析到相应的版本化归档，因此已有管理脚本无需改变。`.deb` 实体不会再同时复制到
-`latest` 和 `archive`。`archive` 为每个系统代号保留当前版和前一版共 2 个具体版本以便
-回退，更旧版本会在成功发布并校验最新版后删除。工作流只有在确认新版 Worker 已上线后，
-才会删除旧布局中的 `latest` 软件包副本，避免 GitHub Actions 与 Worker 独立部署造成短暂
-下载中断。也可以在 GitHub Actions 中手动运行 **Sync official WARP packages to R2** 立即
-同步和清理。R2 包兜底目前只覆盖 Debian/Ubuntu amd64；其他系统或架构仍走 Cloudflare
-官方软件源。
-
-先在 Cloudflare 创建 R2 桶 `warp-3xui-private`，再创建一个只对该桶拥有“对象读取和
-写入”权限的 R2 API Token。把新凭据配置到 `warp-egress-manager` 仓库：
-
-- Variable：`CLOUDFLARE_ACCOUNT_ID`
-- Secrets：`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`
-
-`CLOUDFLARE_ACCOUNT_ID` 可以与 `xray-manager` 相同；两个 R2 Secrets 应使用刚创建的
-专用 Token，不要复用 `xray-manager` 的凭据。
-
-### 部署专用 Worker
-
-仓库的 `worker/` 目录包含完整 Worker 源码和 `wrangler.jsonc`。在 Cloudflare Workers
-中连接本 GitHub 仓库，并设置：
-
-| 项目 | 值 |
-|---|---|
-| Worker 名称 | `warp-3xui-download` |
-| 根目录 | `worker` |
-| 构建命令 | `npm ci` |
-| 部署命令 | `npm run deploy` |
-| R2 Binding | `BUNDLES` → `warp-3xui-private`（已写入配置） |
-
-为 Worker 添加一个独立 Secret：`INSTALL_TOKEN`。它就是用户运行引导脚本时输入的安装
-密钥，不需要、也不建议与 `xray-manager` 相同。Worker 的安装引导与其他对象均要求 Bearer Token：
-
-- `/install.sh`：需要 Bearer Token 的引导脚本；
-- `/releases/warpm/*`：管理脚本与校验值；
-- `/releases/warp3xui/*`：旧版兼容路径；
-- `/packages/cloudflare-warp/*`：定期同步的官方软件包、校验值和版本信息。
-
-配置并完成首次发布后检查：
+仓库已经公开，可以直接下载主脚本：
 
 ```bash
-read -rsp "安装密钥: " WARPM_INSTALL_TOKEN; echo
-curl -6I \
-  -H "Authorization: Bearer ${WARPM_INSTALL_TOKEN}" \
-  https://warp-3xui-download.xinian5216.workers.dev/install.sh
-unset WARPM_INSTALL_TOKEN
-```
-
-不带密钥访问 `/install.sh` 或 `/releases/warpm/warpm.sh` 返回 `401` 才是正常状态。
-
-### 方式二：私有 GitHub 安装
-
-私有仓库不能匿名使用 `curl raw.githubusercontent.com/... | bash`。不要把 GitHub Token
-直接写进命令历史。推荐在 VPS 上先登录 GitHub CLI：
-
-```bash
-gh auth login
-gh api -H 'Accept: application/vnd.github.raw+json' \
-  'repos/xinian5216/warp-egress-manager/contents/warp-3xui.sh?ref=main' \
-  > /tmp/warp-3xui.sh
+curl -fsSL \
+  https://raw.githubusercontent.com/xinian5216/warp-egress-manager/main/warp-3xui.sh \
+  -o /tmp/warp-3xui.sh
 sudo bash /tmp/warp-3xui.sh
 ```
 
-如果未配置 Cloudflare 通道且 VPS 无法访问 GitHub，也可先在电脑上下载
-`warp-3xui.sh`，再用 SCP 上传到 VPS：
-
-```bash
-sudo bash warp-3xui.sh
-```
-
-非交互安装示例：
+不要把 GitHub Token 写进命令历史。非交互安装示例：
 
 ```bash
 sudo bash warp-3xui.sh install \
   --port 40000 \
-  --protocol auto \
+  --protocol masque \
   --egress auto \
   --repo xinian5216/warp-egress-manager \
   --non-interactive
 ```
 
-协议选择：
-
-- `masque`：推荐，Cloudflare 当前默认；
-- `wireguard`：部分网络上更合适；
-- `auto`：先 MASQUE，失败再试 WireGuard。
-
-`--protocol` 决定 VPS 到 Cloudflare 使用 MASQUE 还是 WireGuard；`--egress` 决定 Xray
+`--protocol` 现只接受 MASQUE（`auto` / `wireguard` 会静默迁移）。`--egress` 决定 Xray
 把目标解析为 IPv4、IPv6 还是两者。两组选项互不替代。
+
+安装 Cloudflare WARP 客户端时，**唯一在线来源**是官方软件源
+`pkg.cloudflareclient.com`。官方源失败时脚本会明确退出，而不会改走第三方镜像。
+
+## IPv6-only / GitHub 不可达 VPS
+
+GitHub 不可达时，可以通过 [vps-gateway-manager](https://github.com/xinian5216/vps-gateway-manager)
+或其他标准 GitHub HTTPS 代理访问 GitHub。Gateway **只代理 GitHub 下载**，不能也不应
+把 Cloudflare 官方软件源或普通网站送进 GitHub-only 代理。
+
+```bash
+export WARPM_GITHUB_PROXY='https://gh.example.com:8443'
+curl --proxy "${WARPM_GITHUB_PROXY}" -fsSL \
+  https://raw.githubusercontent.com/xinian5216/warp-egress-manager/main/warp-3xui.sh \
+  -o /tmp/warp-3xui.sh
+sudo -E bash /tmp/warp-3xui.sh
+```
+
+本机已安装 vps-gateway-manager 客户端时：
+
+```bash
+export WARPM_GITHUB_PROXY='http://127.0.0.1:3129'
+```
+
+或写入配置（由脚本保存，不写系统代理）：
+
+```bash
+sudo warpm self-update --github-proxy 'https://gh.example.com:8443'
+```
+
+`warpm self-update` 默认匿名从 GitHub Raw 拉取主脚本，不需要 `gh` 或 PAT。
+
+这个代理**只负责 GitHub**。以下请求仍然直连：
+
+- `pkg.cloudflareclient.com`
+- Cloudflare WARP 网络请求
+- Google / YouTube 验收
+- Cloudflare trace
+
+脚本不会设置 `HTTP_PROXY` / `HTTPS_PROXY`，也不会写入 `/etc/environment`。
+
+WARP 客户端本身仍需要能访问 `pkg.cloudflareclient.com`。若官方软件源不可达：
+
+```text
+Cloudflare 官方软件源当前不可达。
+可检查网络、DNS、IPv6/NAT64，或者手工提供官方离线安装包。
+```
 
 ## 不安装 3x-ui 也能直接使用
 
@@ -345,6 +286,7 @@ sudo warpm update-client
 sudo warpm set-egress ipv4
 sudo warpm set-egress ipv6
 sudo warpm set-egress dual
+sudo warpm self-update --github
 sudo warpm self-update --repo xinian5216/warp-egress-manager
 sudo warpm integrations
 sudo warpm uninstall
@@ -354,13 +296,13 @@ sudo warpm uninstall
 检查状态、切换 IPv4/IPv6 出口、查看代理用法、更新客户端或管理脚本以及卸载。每项操作
 完成后按 Enter 返回主菜单，选择 `0` 才退出。
 
-- `update-client`：优先通过 Cloudflare 官方 APT/YUM 仓库更新；官方源失败时在支持的平台
-  自动回退到 R2 镜像，随后恢复 proxy 模式并验收。
+- `update-client`：只通过 Cloudflare 官方 APT/YUM 仓库更新，随后恢复 proxy 模式并验收。
 - `set-egress`：只切换验收地址族并重生成 Xray 示例，不改默认路由、不重装客户端；3x-ui
   已导入的配置仍需按新 Tag 手动调整。
-- `self-update`：自动沿用首次安装来源；Cloudflare 通道额外校验 SHA256，随后执行
-  `bash -n` 与项目标识检查，再原子安装新脚本，旧版保留为
-  `/usr/local/sbin/warpm.bak`；`warp3xui` 继续作为兼容命令。
+- `self-update`：默认匿名从 GitHub Raw 下载主脚本，不需要 `gh` 或 PAT；也可
+  `--url` / `--file` / `--repo`。下载后执行 `bash -n`、项目标识、版本号检查，拒绝空文件
+  和 HTML 错误页，再把新文件写入暂存并 `mv` 替换；旧版保留为
+  `/usr/local/sbin/warpm.bak`。失败时现有 `warpm` 继续可用。`warp3xui` 继续作为兼容命令。
 - `rotate`：删除并重建 WARP 注册。它可能更换出口，但 WARP 不支持指定国家，不能保证修复
   Google 地区判断。
 
@@ -368,10 +310,9 @@ sudo warpm uninstall
 
 - 主脚本包含语义化版本号 `SCRIPT_VERSION`；
 - `CHANGELOG.md` 记录行为变化；
-- WARP 客户端始终取自 Cloudflare 官方软件源；R2 只保存经官方索引 SHA256 验证的原包，
-  每周同步最新版，并为每个系统代号保留最近 2 个版本化归档；`latest` 只保存版本指针，
-  不再重复存放 `.deb`，也不会按运行次数持续新增对象；
-- GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查，合并后自动同步 R2；
+- WARP 客户端始终取自 Cloudflare 官方软件源，失败时不会改走第三方镜像；
+- 项目脚本的唯一来源是 GitHub；GitHub 不可达时使用可选的 GitHub-only Proxy；
+- GitHub Actions 对每次提交执行 ShellCheck、`bash -n` 和静态安全检查；
 - 更新失败不会切换到全局 WARP 模式；安装中途失败会主动断开未验收的 WARP 连接。
 
 ## 故障排查
@@ -379,12 +320,12 @@ sudo warpm uninstall
 1. `sudo warpm status`
 2. `sudo warpm test --strict`
 3. `sudo journalctl -u warp-svc -n 100 --no-pager`
-4. MASQUE 不通时：重新安装选择 `auto` 或 `wireguard`
-5. IPv6-only 无法访问 `pkg.cloudflareclient.com`：正常情况下会自动回退 R2；若仍失败，
-   检查是否已经运行过包同步工作流、Worker Token、R2 Binding 和对应系统代号的对象
-6. WARP 正常但 Google 仍显示 CN：运行 `rotate` 尝试换出口；仍为 CN 时通常只能换 VPS
+4. Local Proxy 必须使用 MASQUE；旧 WireGuard 配置会自动迁移
+5. IPv6-only 无法访问 `pkg.cloudflareclient.com`：检查网络、DNS、NAT64，或手工提供官方离线包
+6. 无法访问 GitHub：设置 `WARPM_GITHUB_PROXY`，不要把它当成系统全局代理
+7. WARP 正常但 Google 仍显示 CN：运行 `rotate` 尝试换出口；仍为 CN 时通常只能换 VPS
    机房/线路，WARP 本身不能选国家
-7. Google 规则不命中：确认入站 sniffing 已开启，规则在兜底规则之前，`geosite.dat` 足够新
+8. Google 规则不命中：确认入站 sniffing 已开启，规则在兜底规则之前，`geosite.dat` 足够新
 
 ## 安全说明
 

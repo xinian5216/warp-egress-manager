@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.4.0"
 PROJECT_ID="warp-egress-manager"
 LEGACY_PROJECT_ID="warp-3xui-safe"
 PROJECT_NAME="WARP Egress Manager"
@@ -16,9 +16,6 @@ LEGACY_CONFIG_DIR="/etc/warp-3xui"
 LEGACY_CONFIG_FILE="${LEGACY_CONFIG_DIR}/config.env"
 MANAGER_PATH="${WARPM_MANAGER_PATH:-${WARP3XUI_MANAGER_PATH:-/usr/local/sbin/warpm}}"
 LEGACY_MANAGER_PATH="/usr/local/sbin/warp3xui"
-CLOUDFLARE_BASE_DEFAULT="https://warp-3xui-download.xinian5216.workers.dev"
-LEGACY_CLOUDFLARE_BASE="https://xray-manager-download.xinian5216.workers.dev"
-WARP_PACKAGE_R2_PREFIX="packages/cloudflare-warp/deb"
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
 TRACE_V4_URL="https://1.1.1.1/cdn-cgi/trace"
 TRACE_V6_URL="https://[2606:4700:4700::1111]/cdn-cgi/trace"
@@ -35,9 +32,7 @@ PORT="${DEFAULT_PORT}"
 TUNNEL_PROTOCOL="${DEFAULT_PROTOCOL}"
 EGRESS_MODE="${DEFAULT_EGRESS_MODE}"
 UPDATE_REPO="xinian5216/warp-egress-manager"
-UPDATE_SOURCE="${WARPM_UPDATE_SOURCE:-${WARP3XUI_UPDATE_SOURCE:-github}}"
-CLOUDFLARE_BASE="${WARPM_CLOUDFLARE_URL:-${WARP3XUI_CLOUDFLARE_URL:-${CLOUDFLARE_BASE_DEFAULT}}}"
-CLIENT_INSTALL_SOURCE="unknown"
+GITHUB_PROXY=""
 NEW_INSTALL=0
 
 log() { printf '%b\n' "${CYAN}[信息]${NC} $*"; }
@@ -78,7 +73,7 @@ WARP Egress Manager
   warpm curl [-4|-6] [CURL_ARG...]        用 WARP 执行 curl，可严格选地址族
   sudo warpm reconnect                    重新连接并验证
   sudo warpm rotate                       重建 WARP 注册并验证
-  sudo warpm update-client                更新客户端（官方源失败时回退 R2）
+  sudo warpm update-client                从 Cloudflare 官方软件源更新客户端
   sudo warpm set-egress MODE              切换 IPv4/IPv6/双栈验收与 Xray 示例
   sudo warpm self-update [选项]           更新本管理脚本
   sudo warpm integrations                 生成通用代理与可选 3x-ui/Xray 示例
@@ -86,25 +81,27 @@ WARP Egress Manager
 
 install 选项：
   --port PORT             本地 SOCKS5 端口，默认 40000
-  --protocol auto|masque|wireguard
-                          隧道协议，默认 MASQUE；auto 会在失败时回退
+  --protocol masque       隧道协议；Local Proxy 仅支持 MASQUE
+                          （旧的 auto/wireguard 会自动迁移为 masque）
   --egress auto|ipv4|ipv6|dual
                           WARP 出口验收与 curl/Xray 地址族；auto 补齐单栈
   --license-file PATH     可选，从本地权限受控文件读取官方 WARP+ Key
-  --repo OWNER/REPO       私有仓库名，用于后续 gh 自更新
+  --repo OWNER/REPO       GitHub 仓库，用于后续匿名自更新
+  --github-proxy URL      仅用于访问 GitHub 的代理（http/https）
   --non-interactive       不询问，使用给定值/默认值
 
 self-update 选项：
   --file PATH             从本地脚本文件更新
-  --url HTTPS_URL         从 URL 更新（私有仓库 URL 需要自行鉴权）
-  --repo OWNER/REPO       使用已登录的 gh 从私有仓库更新
-  --cloudflare            从 Cloudflare Worker + 私有 R2 更新
-  --github                从已登录的 gh 更新
+  --url HTTPS_URL         从 URL 更新（GitHub URL 会走 GitHub Proxy）
+  --repo OWNER/REPO       从该公开仓库的 GitHub Raw 更新
+  --github                从默认公开仓库的 GitHub Raw 更新
+  --github-proxy URL      仅用于访问 GitHub 的代理（http/https）
 
 安全保证：
   本脚本只启用 127.0.0.1 上的 WARP Local Proxy，不启用系统 WARP 模式，
   不添加 IPv4/IPv6 默认路由，不接管 SSH、管理面板或其他系统流量。
   出口模式只影响验收、warpm curl 默认值和 Xray 示例，不会给网卡改地址或替换原生出口。
+  GitHub Proxy 只作用于 GitHub 下载，不会写入系统代理，也不会转发 Cloudflare 官方源。
 EOF
 }
 
@@ -116,6 +113,57 @@ warp_cli() {
     warp-cli --accept-tos "$@"
 }
 
+github_proxy_url() {
+    if [[ -n "${WARPM_GITHUB_PROXY:-}" ]]; then
+        printf '%s' "${WARPM_GITHUB_PROXY}"
+    else
+        printf '%s' "${GITHUB_PROXY:-}"
+    fi
+}
+
+is_github_url() {
+    local url="$1"
+    case "${url}" in
+        https://github.com/*|https://api.github.com/*|https://codeload.github.com/*|https://gist.github.com/*|https://raw.githubusercontent.com/*|https://objects.githubusercontent.com/*|https://gist.githubusercontent.com/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# GitHub 专用 curl。代理只加 --proxy，绝不 export 系统代理变量。
+github_curl() {
+    local proxy
+    proxy="$(github_proxy_url)"
+    if [[ -n "${proxy}" ]]; then
+        curl --proxy "${proxy}" "$@"
+    else
+        curl "$@"
+    fi
+}
+
+validate_github_repo() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+        || die "仓库名必须是 OWNER/REPO。"
+}
+
+github_raw_url() {
+    local repo="${1:-${UPDATE_REPO}}"
+    local path="${2:-warp-3xui.sh}"
+    local ref="${3:-main}"
+    validate_github_repo "${repo}"
+    printf 'https://raw.githubusercontent.com/%s/%s/%s' "${repo}" "${ref}" "${path}"
+}
+
+migrate_tunnel_protocol() {
+    case "${1}" in
+        MASQUE|masque|AUTO|auto|WireGuard|wireguard|wg|WG) printf '%s' "MASQUE" ;;
+        *) printf '%s' "MASQUE" ;;
+    esac
+}
+
 load_config() {
     local config_to_read="" key value
     if [[ -r "${CONFIG_FILE}" ]]; then
@@ -125,15 +173,15 @@ load_config() {
     fi
     if [[ -n "${config_to_read}" ]]; then
         # 该文件由本脚本生成，只允许固定键值；不直接 source，避免执行任意内容。
+        # 旧键 UPDATE_SOURCE/CLOUDFLARE_BASE/CLIENT_INSTALL_SOURCE 只读不写。
         while IFS='=' read -r key value; do
             case "${key}" in
                 PORT) PORT="${value}" ;;
                 TUNNEL_PROTOCOL) TUNNEL_PROTOCOL="${value}" ;;
                 EGRESS_MODE) EGRESS_MODE="${value}" ;;
                 UPDATE_REPO) UPDATE_REPO="${value}" ;;
-                UPDATE_SOURCE) UPDATE_SOURCE="${value}" ;;
-                CLOUDFLARE_BASE) CLOUDFLARE_BASE="${value}" ;;
-                CLIENT_INSTALL_SOURCE) CLIENT_INSTALL_SOURCE="${value}" ;;
+                GITHUB_PROXY) GITHUB_PROXY="${value}" ;;
+                UPDATE_SOURCE|CLOUDFLARE_BASE|CLIENT_INSTALL_SOURCE) ;;
             esac
         done < "${config_to_read}"
     elif [[ -r "${PROXY_ENV_FILE}" ]]; then
@@ -145,21 +193,8 @@ load_config() {
             esac
         done < "${PROXY_ENV_FILE}"
     fi
-    if [[ "${CLOUDFLARE_BASE%/}" == "${LEGACY_CLOUDFLARE_BASE}" ]]; then
-        CLOUDFLARE_BASE="${CLOUDFLARE_BASE_DEFAULT}"
-    fi
-    [[ -z "${WARP3XUI_UPDATE_SOURCE:-}" ]] \
-        || UPDATE_SOURCE="${WARP3XUI_UPDATE_SOURCE}"
-    [[ -z "${WARPM_UPDATE_SOURCE:-}" ]] \
-        || UPDATE_SOURCE="${WARPM_UPDATE_SOURCE}"
-    [[ -z "${WARP3XUI_CLOUDFLARE_URL:-}" ]] \
-        || CLOUDFLARE_BASE="${WARP3XUI_CLOUDFLARE_URL}"
-    [[ -z "${WARPM_CLOUDFLARE_URL:-}" ]] \
-        || CLOUDFLARE_BASE="${WARPM_CLOUDFLARE_URL}"
-    case "${UPDATE_SOURCE}" in
-        github|cloudflare) ;;
-        *) die "无效更新来源：${UPDATE_SOURCE}" ;;
-    esac
+    TUNNEL_PROTOCOL="$(migrate_tunnel_protocol "${TUNNEL_PROTOCOL}")"
+    [[ -z "${WARPM_GITHUB_PROXY:-}" ]] || GITHUB_PROXY="${WARPM_GITHUB_PROXY}"
 }
 
 normalize_arch() {
@@ -182,10 +217,8 @@ validate_port() {
 
 normalize_protocol() {
     case "${1,,}" in
-        auto) printf '%s' "AUTO" ;;
-        masque) printf '%s' "MASQUE" ;;
-        wireguard|wg) printf '%s' "WireGuard" ;;
-        *) die "协议只能是 auto、masque 或 wireguard。" ;;
+        auto|masque|wireguard|wg) printf '%s' "MASQUE" ;;
+        *) die "协议只能是 masque。Cloudflare Linux WARP 的 Local Proxy 仅支持 MASQUE；旧的 auto/wireguard 会自动迁移。" ;;
     esac
 }
 
@@ -293,33 +326,6 @@ ensure_effective_egress_mode() {
     log "自动选择：$(egress_mode_label)。原生出口不会被替换。"
 }
 
-create_cloudflare_curl_config() {
-    local output="$1"
-    local inherited="${WARPM_AUTH_CURL_CONFIG:-}"
-    local token="${WARPM_INSTALL_TOKEN:-${WARP3XUI_INSTALL_TOKEN:-}}"
-
-    if [[ -n "${inherited}" && -r "${inherited}" ]]; then
-        cp -- "${inherited}" "${output}"
-        chmod 600 "${output}"
-        return 0
-    fi
-    if [[ -z "${token}" && -r /dev/tty ]]; then
-        printf 'Cloudflare 安装密钥（用于 R2 兜底）：' >/dev/tty
-        IFS= read -r -s token </dev/tty || true
-        printf '\n' >/dev/tty
-    fi
-    [[ -n "${token}" ]] || return 1
-    [[ "${token}" != *$'\n'* && "${token}" != *$'\r'* && "${token}" != *'"'* ]] \
-        || die "Cloudflare 安装密钥包含非法字符。"
-    {
-        printf 'header = "Authorization: Bearer %s"\n' "${token}"
-        printf '%s\n' 'fail' 'silent' 'show-error' 'location'
-        printf '%s\n' 'connect-timeout = 15' 'max-time = 300' 'retry = 3'
-    } > "${output}"
-    chmod 600 "${output}"
-    unset token WARPM_INSTALL_TOKEN WARP3XUI_INSTALL_TOKEN 2>/dev/null || true
-}
-
 try_install_cloudflare_repo() {
     local -a repo_probe=(--fail --silent --show-error --location --max-time 15)
     if [[ -z "${DIRECT_V4:-}" && -n "${DIRECT_V6:-}" ]]; then
@@ -352,56 +358,6 @@ try_install_cloudflare_repo() {
             ;;
     esac
     command -v warp-cli >/dev/null 2>&1 || return 1
-    CLIENT_INSTALL_SOURCE="official"
-}
-
-install_cloudflare_from_r2() {
-    local arch package_base temp_dir curl_config package checksum expected actual version
-    [[ "${OS_ID}" == "debian" || "${OS_ID}" == "ubuntu" ]] || return 1
-    arch="$(normalize_arch "${ARCH}")"
-    [[ "${arch}" == "amd64" ]] || {
-        warn "R2 官方包镜像当前只同步 amd64，当前架构为 ${ARCH}。"
-        return 1
-    }
-    [[ -n "${OS_CODENAME}" ]] || return 1
-    validate_codename "${OS_CODENAME}"
-
-    temp_dir="$(mktemp -d /tmp/warpm-package.XXXXXX)"
-    curl_config="${temp_dir}/curl.conf"
-    package="${temp_dir}/cloudflare-warp.deb"
-    checksum="${temp_dir}/cloudflare-warp.sha256"
-    chmod 700 "${temp_dir}"
-    if ! create_cloudflare_curl_config "${curl_config}"; then
-        rm -rf "${temp_dir}"
-        return 1
-    fi
-
-    package_base="${CLOUDFLARE_BASE%/}/${WARP_PACKAGE_R2_PREFIX}/${OS_CODENAME}/${arch}/latest"
-    if ! curl --config "${curl_config}" "${package_base}/cloudflare-warp.deb" -o "${package}" \
-        || ! curl --config "${curl_config}" "${package_base}/cloudflare-warp.sha256" -o "${checksum}"; then
-        rm -rf "${temp_dir}"
-        return 1
-    fi
-    expected="$(tr -d '[:space:]' < "${checksum}")"
-    actual="$(sha256_file "${package}" 2>/dev/null || true)"
-    if [[ -z "${expected}" || "${expected}" != "${actual}" ]]; then
-        rm -rf "${temp_dir}"
-        warn "R2 中的 WARP 软件包 SHA256 校验失败。"
-        return 1
-    fi
-    version="$(dpkg-deb -f "${package}" Version 2>/dev/null || true)"
-    [[ -n "${version}" ]] || {
-        rm -rf "${temp_dir}"
-        return 1
-    }
-    log "正在安装 R2 镜像中的 Cloudflare 官方包 ${version}。"
-    if ! apt-get install -y "${package}"; then
-        rm -rf "${temp_dir}"
-        return 1
-    fi
-    rm -rf "${temp_dir}"
-    command -v warp-cli >/dev/null 2>&1 || return 1
-    CLIENT_INSTALL_SOURCE="r2"
 }
 
 install_cloudflare_package() {
@@ -409,10 +365,7 @@ install_cloudflare_package() {
     if try_install_cloudflare_repo; then
         ok "已通过 Cloudflare 官方软件源安装 WARP。"
     else
-        warn "Cloudflare 官方软件源不可用，尝试 Worker + 私有 R2 官方包镜像。"
-        install_cloudflare_from_r2 \
-            || die "官方软件源与 R2 镜像均不可用。R2 兜底仅支持已同步的 Debian/Ubuntu amd64；也可使用 NAT64、临时代理或离线官方包。"
-        ok "已通过 R2 镜像安装 Cloudflare 官方 WARP 包。"
+        die "Cloudflare 官方软件源当前不可达。可检查网络、DNS、IPv6/NAT64，或者手工提供官方离线安装包。"
     fi
     systemctl enable --now warp-svc.service
 }
@@ -439,7 +392,7 @@ apply_license() {
 
 set_protocol() {
     local protocol="$1"
-    [[ "${protocol}" != "AUTO" ]] || protocol="MASQUE"
+    [[ "${protocol}" == "MASQUE" ]] || protocol="MASQUE"
     warp_cli tunnel protocol set "${protocol}"
 }
 
@@ -485,24 +438,10 @@ proxy_capabilities_ready() {
 }
 
 connect_with_fallback() {
-    local requested="$1"
-    if [[ "${requested}" == "AUTO" ]]; then
-        log "先尝试 MASQUE。"
-        configure_proxy_mode "MASQUE"
-        if wait_for_proxy 15; then
-            TUNNEL_PROTOCOL="MASQUE"
-            return 0
-        fi
-        warn "MASQUE 未通过验证，回退 WireGuard。"
-        configure_proxy_mode "WireGuard"
-        wait_for_proxy 20 || return 1
-        TUNNEL_PROTOCOL="WireGuard"
-        return 0
-    fi
-
-    configure_proxy_mode "${requested}"
+    TUNNEL_PROTOCOL="MASQUE"
+    log "Local Proxy 使用 MASQUE（Cloudflare Linux WARP 的 Proxy 模式仅支持 MASQUE）。"
+    configure_proxy_mode "MASQUE"
     wait_for_proxy 20 || return 1
-    TUNNEL_PROTOCOL="${requested}"
 }
 
 save_config() {
@@ -512,9 +451,7 @@ save_config() {
         printf 'TUNNEL_PROTOCOL=%s\n' "${TUNNEL_PROTOCOL}"
         printf 'EGRESS_MODE=%s\n' "${EGRESS_MODE}"
         printf 'UPDATE_REPO=%s\n' "${UPDATE_REPO}"
-        printf 'UPDATE_SOURCE=%s\n' "${UPDATE_SOURCE}"
-        printf 'CLOUDFLARE_BASE=%s\n' "${CLOUDFLARE_BASE%/}"
-        printf 'CLIENT_INSTALL_SOURCE=%s\n' "${CLIENT_INSTALL_SOURCE}"
+        printf 'GITHUB_PROXY=%s\n' "${GITHUB_PROXY}"
     } > "${CONFIG_FILE}"
     chmod 600 "${CONFIG_FILE}"
     render_generic_proxy_files
@@ -807,7 +744,9 @@ show_status() {
     printf '代理地址：127.0.0.1:%s\n' "${PORT}"
     printf '隧道协议：%s\n' "${TUNNEL_PROTOCOL}"
     printf '可选出口：%s\n' "$(egress_mode_label)"
-    printf '客户端安装来源：%s\n' "${CLIENT_INSTALL_SOURCE}"
+    if [[ -n "${GITHUB_PROXY}" ]]; then
+        printf 'GitHub Proxy：%s\n' "${GITHUB_PROXY}"
+    fi
     printf '旧版兼容标识：%s\n\n' "${LEGACY_PROJECT_ID}"
     if command -v warp-cli >/dev/null 2>&1; then
         warp_cli status || true
@@ -831,12 +770,13 @@ parse_install_args() {
             --egress) [[ $# -ge 2 ]] || die "--egress 缺少值"; EGRESS_MODE="$(normalize_egress_mode "$2")"; shift 2 ;;
             --license-file) [[ $# -ge 2 ]] || die "--license-file 缺少值"; LICENSE_FILE="$2"; shift 2 ;;
             --repo) [[ $# -ge 2 ]] || die "--repo 缺少值"; UPDATE_REPO="$2"; shift 2 ;;
+            --github-proxy) [[ $# -ge 2 ]] || die "--github-proxy 缺少值"; GITHUB_PROXY="$2"; shift 2 ;;
             --non-interactive) NON_INTERACTIVE=1; shift ;;
             *) die "未知 install 选项：$1" ;;
         esac
     done
     validate_port "${PORT}"
-    [[ "${TUNNEL_PROTOCOL}" =~ ^(AUTO|MASQUE|WireGuard)$ ]] || TUNNEL_PROTOCOL="$(normalize_protocol "${TUNNEL_PROTOCOL}")"
+    TUNNEL_PROTOCOL="MASQUE"
     EGRESS_MODE="$(normalize_egress_mode "${EGRESS_MODE}")"
     LICENSE_KEY=""
     if [[ -n "${LICENSE_FILE}" ]]; then
@@ -851,22 +791,7 @@ interactive_options() {
     read -r input
     [[ -z "${input}" ]] || PORT="${input}"
     validate_port "${PORT}"
-
-    cat <<'EOF'
-隧道协议：
-  1. MASQUE（推荐，Cloudflare 当前默认）
-  2. WireGuard
-  3. 自动（MASQUE 失败后尝试 WireGuard）
-EOF
-    printf '请选择 [1]：'
-    read -r input
-    case "${input:-1}" in
-        1) TUNNEL_PROTOCOL="MASQUE" ;;
-        2) TUNNEL_PROTOCOL="WireGuard" ;;
-        3) TUNNEL_PROTOCOL="AUTO" ;;
-        *) die "无效选项。" ;;
-    esac
-
+    TUNNEL_PROTOCOL="MASQUE"
     interactive_egress_options
 }
 
@@ -934,7 +859,7 @@ do_install() {
     ensure_registration
     apply_license "${LICENSE_KEY}"
     log "配置 Local Proxy；不会修改系统默认路由。"
-    connect_with_fallback "${TUNNEL_PROTOCOL}" || die "WARP 代理无法连接。可改用 --protocol auto 重试。"
+    connect_with_fallback || die "WARP 代理无法连接。"
     proxy_capabilities_ready || die "所选 WARP IPv4/IPv6 出口未通过验证。"
     save_config
     install_manager
@@ -950,7 +875,7 @@ do_reconnect() {
     require_root
     load_config
     ensure_effective_egress_mode
-    connect_with_fallback "${TUNNEL_PROTOCOL}" || die "重连失败。"
+    connect_with_fallback || die "重连失败。"
     proxy_capabilities_ready || die "重连后所选 WARP 出口仍不可用。"
     test_warp 0 || true
 }
@@ -990,86 +915,115 @@ sha256_file() {
     fi
 }
 
-download_cloudflare_update() {
-    local output="$1" temp_dir curl_config checksum expected actual script_path checksum_path
-    CLOUDFLARE_BASE="${CLOUDFLARE_BASE%/}"
-    temp_dir="$(mktemp -d /tmp/warpm-cloudflare.XXXXXX)"
-    curl_config="${temp_dir}/curl.conf"
-    checksum="${temp_dir}/warpm.sha256"
-    chmod 700 "${temp_dir}"
-    create_cloudflare_curl_config "${curl_config}" \
-        || { rm -rf "${temp_dir}"; die "没有 Cloudflare 安装密钥。"; }
-
-    script_path="releases/warpm/warpm.sh"
-    checksum_path="releases/warpm/warpm.sha256"
-    if ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${script_path}" -o "${output}" \
-        || ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${checksum_path}" -o "${checksum}"; then
-        warn "新发布路径不可用，尝试旧版兼容路径。"
-        script_path="releases/warp3xui/warp-3xui.sh"
-        checksum_path="releases/warp3xui/warp-3xui.sha256"
+fetch_update_url() {
+    local url="$1" output="$2"
+    if is_github_url "${url}"; then
+        github_curl -fsSL "${url}" -o "${output}"
+    else
+        curl -fsSL "${url}" -o "${output}"
     fi
-    if [[ ! -s "${output}" || ! -s "${checksum}" ]] \
-        && { ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${script_path}" -o "${output}" \
-            || ! curl --config "${curl_config}" "${CLOUDFLARE_BASE}/${checksum_path}" -o "${checksum}"; }; then
-        rm -rf "${temp_dir}"
-        die "从 Cloudflare 下载管理脚本或 SHA256 失败。"
-    fi
+}
 
-    expected="$(tr -d '[:space:]' < "${checksum}")"
-    actual="$(sha256_file "${output}" 2>/dev/null || true)"
-    rm -rf "${temp_dir}"
-    [[ -n "${expected}" && "${expected}" == "${actual}" ]] \
-        || die "Cloudflare 更新文件 SHA256 校验失败。"
+validate_update_payload() {
+    local file="$1" first_nonempty
+    [[ -s "${file}" ]] || die "下载文件为空。"
+    first_nonempty="$(grep -m1 -v '^[[:space:]]*$' "${file}" || true)"
+    case "${first_nonempty,,}" in
+        '<!doctype html'*|'<html'*)
+            die "下载内容不是脚本（得到 HTML 错误页）。"
+            ;;
+    esac
+    [[ "${first_nonempty}" == '#!'* ]] || die "更新文件不是 shell 脚本。"
+    bash -n "${file}"
+    grep -q 'PROJECT_ID="warp-egress-manager"' "${file}" || die "更新文件不是本项目脚本。"
+    [[ -n "$(version_from_file "${file}")" ]] || die "无法读取新脚本版本。"
+}
+
+restore_manager_backup() {
+    [[ -e "${MANAGER_PATH}.bak" ]] || return 1
+    if mv -f "${MANAGER_PATH}.bak" "${MANAGER_PATH}" 2>/dev/null; then
+        return 0
+    fi
+    cp -a "${MANAGER_PATH}.bak" "${MANAGER_PATH}"
 }
 
 self_update() {
     require_root
     load_config
-    local source_type="" source_value="" temp_file new_version
+    local source_type="" source_value="" temp_file="" work_dir new_version
     while (($#)); do
         case "$1" in
-            --file|--url|--repo)
+            --file|--url)
                 [[ $# -ge 2 ]] || die "$1 缺少值"
                 source_type="${1#--}"; source_value="$2"; shift 2
                 ;;
-            --cloudflare) source_type="cloudflare"; shift ;;
-            --github) source_type="repo"; source_value="${UPDATE_REPO}"; shift ;;
+            --repo)
+                [[ $# -ge 2 ]] || die "--repo 缺少值"
+                validate_github_repo "$2"
+                UPDATE_REPO="$2"
+                source_type="url"
+                source_value="$(github_raw_url "$2")"
+                shift 2
+                ;;
+            --github)
+                source_type="url"
+                source_value="$(github_raw_url)"
+                shift
+                ;;
+            --github-proxy)
+                [[ $# -ge 2 ]] || die "--github-proxy 缺少值"
+                GITHUB_PROXY="$2"
+                shift 2
+                ;;
+            --cloudflare)
+                warn "Cloudflare Worker 更新通道已退役，改为从公开 GitHub Raw 更新。"
+                source_type="url"
+                source_value="$(github_raw_url)"
+                shift
+                ;;
             *) die "未知 self-update 选项：$1" ;;
         esac
     done
     if [[ -z "${source_type}" ]]; then
-        case "${UPDATE_SOURCE}" in
-            cloudflare) source_type="cloudflare" ;;
-            github) source_type="repo"; source_value="${UPDATE_REPO}" ;;
-            *) die "未知更新来源：${UPDATE_SOURCE}" ;;
-        esac
+        source_type="url"
+        source_value="$(github_raw_url)"
     fi
-    temp_file="$(mktemp /tmp/warpm-update.XXXXXX)"
+
+    work_dir="$(dirname -- "${MANAGER_PATH}")"
+    install -d -m 755 "${work_dir}"
+    temp_file="$(mktemp "${work_dir}/.warpm-update.XXXXXX")"
+    local saved_exit
+    saved_exit="$(trap -p EXIT || true)"
+    trap 'rm -f "${temp_file:-}"' EXIT
     case "${source_type}" in
         file) cp -- "${source_value}" "${temp_file}" ;;
-        url) curl -fsSL "${source_value}" -o "${temp_file}" ;;
-        repo)
-            command -v gh >/dev/null 2>&1 || die "私有仓库更新需要已登录的 gh；也可用 --file。"
-            gh api -H 'Accept: application/vnd.github.raw+json' \
-                "repos/${source_value}/contents/warp-3xui.sh?ref=main" > "${temp_file}"
-            UPDATE_REPO="${source_value}"
-            UPDATE_SOURCE="github"
-            ;;
-        cloudflare)
-            download_cloudflare_update "${temp_file}"
-            UPDATE_SOURCE="cloudflare"
+        url) fetch_update_url "${source_value}" "${temp_file}" ;;
+        *)
+            die "未知更新来源：${source_type}"
             ;;
     esac
-    bash -n "${temp_file}"
-    grep -q 'PROJECT_ID="warp-egress-manager"' "${temp_file}" || die "更新文件不是本项目脚本。"
+    validate_update_payload "${temp_file}"
     new_version="$(version_from_file "${temp_file}")"
-    [[ -n "${new_version}" ]] || die "无法读取新脚本版本。"
-    cp -a "${MANAGER_PATH}" "${MANAGER_PATH}.bak" 2>/dev/null || true
-    install -m 755 "${temp_file}" "${MANAGER_PATH}"
+    chmod 755 "${temp_file}"
+
+    if [[ -e "${MANAGER_PATH}" ]]; then
+        cp -a "${MANAGER_PATH}" "${MANAGER_PATH}.bak"
+    fi
+    if ! mv -f "${temp_file}" "${MANAGER_PATH}"; then
+        if [[ -e "${MANAGER_PATH}.bak" ]] && restore_manager_backup; then
+            die "替换 ${MANAGER_PATH} 失败，已从备份恢复为旧版本。"
+        fi
+        die "替换 ${MANAGER_PATH} 失败，备份也未能恢复。请检查 ${MANAGER_PATH} 与 ${MANAGER_PATH}.bak。"
+    fi
+    temp_file=""
+    if [[ -n "${saved_exit}" ]]; then
+        eval "${saved_exit}"
+    else
+        trap - EXIT
+    fi
     if [[ "${LEGACY_MANAGER_PATH}" != "${MANAGER_PATH}" ]]; then
         ln -sfn "${MANAGER_PATH}" "${LEGACY_MANAGER_PATH}"
     fi
-    rm -f "${temp_file}"
     save_config
     ok "管理脚本已更新：${SCRIPT_VERSION} -> ${new_version}。主命令：warpm。"
 }
@@ -1132,7 +1086,7 @@ WARP Egress Manager v${SCRIPT_VERSION}
 4. 查看代理地址与使用示例
 5. 重新连接
 6. 重建 WARP 注册
-7. 更新 Cloudflare WARP 客户端（支持 R2 兜底）
+7. 更新 Cloudflare WARP 客户端
 8. 生成通用代理与可选 Xray/3x-ui 示例
 9. 更新本管理脚本
 10. 卸载

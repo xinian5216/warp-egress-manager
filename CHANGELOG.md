@@ -1,9 +1,21 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-09-20
 
-- R2 官方包同步只保留 Debian 12/13（bookworm/trixie）和 Ubuntu 22.04/24.04（jammy/noble），不再同步 Ubuntu 26.04（resolute）。未同步代号仍走 Cloudflare 官方软件源。
-- 同步工作流在结束后删除本 run 的 GitHub Actions artifact，避免过期制品占满私有仓库账号配额。
+### Removed / Deprecated
+
+- Worker/R2 发布链退役：删除 `cloudflare-install.sh`、`worker/`、`publish-r2.yml` 和 `sync-warp-packages.yml`。项目代码与 Release 只来自 GitHub；Cloudflare WARP 软件包只来自官方 APT/YUM 仓库。
+- 官方 WARP 包不再回退到私有 R2 镜像。`pkg.cloudflareclient.com` 不可达时明确失败，并提示检查网络、DNS、IPv6/NAT64 或手工提供官方离线安装包。
+- Local Proxy 协议简化为 MASQUE。Cloudflare Linux WARP 自 2025.8.779.0 起 Proxy 模式仅支持 MASQUE；旧配置中的 `AUTO` / `WireGuard` 会自动迁移，不会报错。
+- 配置文件不再写入 `UPDATE_SOURCE`、`CLOUDFLARE_BASE`、`CLIENT_INSTALL_SOURCE` 或任何 Token。
+- `self-update --cloudflare` 不再访问 Worker；若仍被调用，会提示通道已退役并改走公开 GitHub Raw。
+- self-update 不再依赖 GitHub CLI / PAT；默认匿名下载 `raw.githubusercontent.com`。
+
+### Added
+
+- 可选 GitHub Proxy：`WARPM_GITHUB_PROXY` / `GITHUB_PROXY` / `--github-proxy`。只给 GitHub 下载加 `curl --proxy`，不写入 `HTTP_PROXY`、`HTTPS_PROXY` 或 `/etc/environment`，也不转发 Cloudflare 官方源、trace、Google 或 YouTube。
+- 已安装用户无需手工清理旧配置：读取旧 `config.env` 时兼容 `UPDATE_SOURCE=cloudflare` 和 `CLIENT_INSTALL_SOURCE=r2`，保存时只写新字段。
+- 仓库改为 public；安装与更新走公开 HTTPS。
 
 ## 1.3.2 - 2026-08-11
 

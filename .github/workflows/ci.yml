@@ -15,27 +15,8 @@ jobs:
       - name: Install checks
         run: sudo apt-get update && sudo apt-get install -y shellcheck jq
       - name: ShellCheck
-        run: shellcheck warp-3xui.sh cloudflare-install.sh tests/static.sh tests/modes.sh
+        run: shellcheck warp-3xui.sh tests/static.sh tests/modes.sh
       - name: Static tests
         run: bash tests/static.sh
       - name: Egress mode tests
         run: bash tests/modes.sh
-
-  worker:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: worker
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Test Worker routes
-        run: npm test
-      - name: Validate Worker deployment bundle
-        run: npm run check
