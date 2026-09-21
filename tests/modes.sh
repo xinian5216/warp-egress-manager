@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# The tests below intentionally override functions (curl, github_curl, mv)
+# after sourcing warp-3xui.sh and set variables consumed indirectly. Different
+# ShellCheck versions flag these as SC2218 / SC2329 / SC2034, so disable them
+# file-wide; the overrides are exercised at runtime, not statically.
+# shellcheck disable=SC2218,SC2329,SC2034
 set -Eeuo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
