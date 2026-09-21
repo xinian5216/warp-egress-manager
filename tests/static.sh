@@ -32,6 +32,17 @@ grep -Fq 'github_curl()' "${script}"
 grep -Fq 'github_raw_url()' "${script}"
 grep -Fq 'raw.githubusercontent.com' "${script}"
 grep -Fq 'pkg.cloudflareclient.com' "${script}"
+
+# Stable update channel: default self-update must resolve the latest formal
+# GitHub Release. Fail closed on any error; there must be no main fallback.
+grep -Fq 'releases/latest' "${script}"
+grep -Fq 'resolve_latest_release_tag' "${script}"
+grep -Fq 'validate_release_tag' "${script}"
+grep -Fq 'compare_versions' "${script}"
+# Any code path that resolves to main must require the explicit --main flag.
+if grep -Eq 'source_value="\$\(github_raw_url\)"' "${script}"; then
+    grep -Fq -- '--main' "${script}" || { echo "--main flag missing" >&2; exit 1; }
+fi
 if grep -Fq 'github_gh()' "${script}"; then
     echo "github_gh should have been removed" >&2
     exit 1

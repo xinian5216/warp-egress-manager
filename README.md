@@ -57,7 +57,7 @@ MASQUE，不再支持 WireGuard。旧安装里的 `AUTO` / `WireGuard` 会在读
 5. 可选 Xray / ProxyChains 集成
 6. 可选 GitHub Proxy（仅当 GitHub 不可达时）
 
-仓库已经公开，可以直接下载主脚本：
+仓库已经公开。`main` 是开发基线，随时可下载最新代码：
 
 ```bash
 curl -fsSL \
@@ -65,6 +65,19 @@ curl -fsSL \
   -o /tmp/warp-3xui.sh
 sudo bash /tmp/warp-3xui.sh
 ```
+
+正式环境建议从 [Releases](https://github.com/xinian5216/warp-egress-manager/releases)
+页面对应的版本 tag 安装（把 `<tag>` 换成例如 `v1.4.0`）：
+
+```bash
+curl -fsSL \
+  https://raw.githubusercontent.com/xinian5216/warp-egress-manager/<tag>/warp-3xui.sh \
+  -o /tmp/warp-3xui.sh
+sudo bash /tmp/warp-3xui.sh
+```
+
+> `main` 是开发基线；正式 Release 才是生产更新通道。安装后的 `warpm self-update`
+> 也只会更新到最新正式 Release。
 
 不要把 GitHub Token 写进命令历史。非交互安装示例：
 
@@ -109,7 +122,9 @@ export WARPM_GITHUB_PROXY='http://127.0.0.1:3129'
 sudo warpm self-update --github-proxy 'https://gh.example.com:8443'
 ```
 
-`warpm self-update` 默认匿名从 GitHub Raw 拉取主脚本，不需要 `gh` 或 PAT。
+`warpm self-update` 默认查询最新**正式 GitHub Release**，并从对应不可变 tag 下载主脚本；
+不需要 `gh` 或 PAT。`main` 是开发基线，不是生产更新通道；只有显式 `warpm self-update --main`
+才会读取 `main`，且仅用于测试。
 
 这个代理**只负责 GitHub**。以下请求仍然直连：
 
@@ -288,6 +303,7 @@ sudo warpm set-egress ipv6
 sudo warpm set-egress dual
 sudo warpm self-update --github
 sudo warpm self-update --repo xinian5216/warp-egress-manager
+sudo warpm self-update --main
 sudo warpm integrations
 sudo warpm uninstall
 ```
@@ -299,10 +315,15 @@ sudo warpm uninstall
 - `update-client`：只通过 Cloudflare 官方 APT/YUM 仓库更新，随后恢复 proxy 模式并验收。
 - `set-egress`：只切换验收地址族并重生成 Xray 示例，不改默认路由、不重装客户端；3x-ui
   已导入的配置仍需按新 Tag 手动调整。
-- `self-update`：默认匿名从 GitHub Raw 下载主脚本，不需要 `gh` 或 PAT；也可
-  `--url` / `--file` / `--repo`。下载后执行 `bash -n`、项目标识、版本号检查，拒绝空文件
-  和 HTML 错误页，再把新文件写入暂存并 `mv` 替换；旧版保留为
-  `/usr/local/sbin/warpm.bak`。失败时现有 `warpm` 继续可用。`warp3xui` 继续作为兼容命令。
+- `self-update`：默认查询最新正式 GitHub Release（`releases/latest`），并从对应不可变 tag
+  下载主脚本，不需要 `gh` 或 PAT；也可 `--url` / `--file` / `--repo`。draft 与 prerelease
+  会被拒绝，Release tag 必须与脚本 `SCRIPT_VERSION` 一致，否则拒绝安装；查询或解析失败时
+  明确退出，**不会**回退 `main`。与最新正式版本相同时提示已最新；当前版本更高时拒绝自动
+  降级。下载后执行 `bash -n`、项目标识、版本号检查，拒绝空文件和 HTML 错误页，再把新文件
+  写入暂存并 `mv` 替换；旧版保留为 `/usr/local/sbin/warpm.bak`。失败时现有 `warpm` 继续可用。
+  `warp3xui` 继续作为兼容命令。
+  仅用于测试：`sudo warpm self-update --main` 显式从 `main` 分支更新；`main` 是开发基线，
+  不是生产更新通道。
 - `rotate`：删除并重建 WARP 注册。它可能更换出口，但 WARP 不支持指定国家，不能保证修复
   Google 地区判断。
 
