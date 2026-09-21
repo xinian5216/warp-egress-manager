@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# The tests below intentionally override functions (curl, github_curl, mv)
+# after sourcing warp-3xui.sh and set variables consumed indirectly. Different
+# ShellCheck versions flag these as SC2218 / SC2329 / SC2034, so disable them
+# file-wide; the overrides are exercised at runtime, not statically.
+# shellcheck disable=SC2218,SC2329,SC2034
 set -Eeuo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -85,7 +90,10 @@ save_config
 render_integrations >/dev/null
 jq -e '. == 40000' <(awk -F= '$1 == "WARP_PROXY_PORT" {print $2}' "${PROXY_ENV_FILE}") >/dev/null
 grep -Fq 'socks5 127.0.0.1 40000' "${PROXYCHAINS_FILE}"
-print_proxy_env | grep -Fq "ALL_PROXY='socks5h://127.0.0.1:40000'"
+# Capture into a variable instead of piping to grep -q to avoid a SIGPIPE
+# race between print_proxy_env and an early-closing reader.
+proxy_env_output="$(print_proxy_env)"
+grep -Fq "ALL_PROXY='socks5h://127.0.0.1:40000'" <<<"${proxy_env_output}"
 jq -e 'length == 3' "${CONFIG_DIR}/xray-outbounds.json" >/dev/null
 jq -e 'map(.targetStrategy) == ["ForceIPv4", "ForceIPv6", "UseIP"]' \
     "${CONFIG_DIR}/xray-outbounds.json" >/dev/null
@@ -156,6 +164,97 @@ assert_equal "$(github_raw_url)" \
     "https://raw.githubusercontent.com/xinian5216/warp-egress-manager/main/warp-3xui.sh"
 assert_equal "$(github_raw_url 'other/repo')" \
     "https://raw.githubusercontent.com/other/repo/main/warp-3xui.sh"
+# Explicit ref (release tag) must be used verbatim; this is the production path.
+assert_equal "$(github_raw_url 'xinian5216/warp-egress-manager' warp-3xui.sh 'v1.4.1')" \
+    "https://raw.githubusercontent.com/xinian5216/warp-egress-manager/v1.4.1/warp-3xui.sh"
+
+# --- Release tag validation (path-injection guard) ---
+validate_release_tag 'v1.4.1'
+validate_release_tag 'v2.0.0'
+# die() exits, so negative cases must run in a subshell.
+for bad in '../../main' 'main' 'refs/heads/main' 'v1.4' 'v1.4.1/xxx' 'v1.4.1/../../x' 'V1.4.1' 'v1.4.1-rc1'; do
+    if (validate_release_tag "${bad}") >/dev/null 2>&1; then
+        echo "validate_release_tag should reject: ${bad}" >&2
+        exit 1
+    fi
+done
+
+# --- Version comparison ---
+assert_equal "$(compare_versions 1.4.0 1.4.1)" '-1'
+assert_equal "$(compare_versions 1.4.1 1.4.1)" '0'
+assert_equal "$(compare_versions 1.5.0 1.4.1)" '1'
+assert_equal "$(compare_versions 1.4.10 1.4.9)" '1'
+assert_equal "$(compare_versions 2.0.0 10.0.0)" '-1'
+assert_equal "$(compare_versions 1.10.0 1.9.0)" '1'
+
+# --- latest stable release resolution ---
+# 1. latest stable -> downloads from the tag, not main.
+github_curl() { printf '%s' '{"tag_name":"v1.4.1","draft":false,"prerelease":false}'; }
+assert_equal "$(resolve_latest_release_tag 'xinian5216/warp-egress-manager')" 'v1.4.1'
+# 2. prerelease -> rejected.
+github_curl() { printf '%s' '{"tag_name":"v1.5.0-beta.1","draft":false,"prerelease":true}'; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "prerelease must be rejected" >&2
+    exit 1
+fi
+# 3. draft -> rejected.
+github_curl() { printf '%s' '{"tag_name":"v1.4.1","draft":true,"prerelease":false}'; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "draft must be rejected" >&2
+    exit 1
+fi
+# 4. invalid tag -> rejected.
+for bad_json in \
+    '{"tag_name":"../../main","draft":false,"prerelease":false}' \
+    '{"tag_name":"v1.4","draft":false,"prerelease":false}' \
+    '{"tag_name":"main","draft":false,"prerelease":false}' \
+    '{"tag_name":"v1.4.1/xxx","draft":false,"prerelease":false}'; do
+    github_curl() { printf '%s' "${bad_json}"; }
+    if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+        echo "invalid tag must be rejected: ${bad_json}" >&2
+        exit 1
+    fi
+done
+# 5. API failure -> fail closed, no main fallback.
+github_curl() { return 22; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "API failure must fail closed" >&2
+    exit 1
+fi
+# 6. no release / 404-ish / empty -> fail closed.
+github_curl() { printf '%s' '{"message":"Not Found"}'; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "missing release must fail closed" >&2
+    exit 1
+fi
+github_curl() { printf '%s' 'not json at all'; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "invalid JSON must fail closed" >&2
+    exit 1
+fi
+github_curl() { printf '%s' ''; }
+if (resolve_latest_release_tag 'xinian5216/warp-egress-manager') >/dev/null 2>&1; then
+    echo "empty payload must fail closed" >&2
+    exit 1
+fi
+# 7. repo name validation still applies to the API path.
+github_curl() { printf '%s' '{"tag_name":"v1.4.1","draft":false,"prerelease":false}'; }
+if (resolve_latest_release_tag 'not a repo') >/dev/null 2>&1; then
+    echo "resolve_latest_release_tag must validate the repo" >&2
+    exit 1
+fi
+# Restore a github_curl that delegates to the curl override (no body output),
+# keeping the same proxy decision logic as the script.
+unset -f github_curl
+github_curl() {
+    local proxy
+    proxy="$(github_proxy_url)"
+    if [[ -n "${proxy}" ]]; then
+        curl --proxy "${proxy}" "$@"
+    else
+        curl "$@"
+    fi
+}
 
 WARPM_GITHUB_PROXY='http://127.0.0.1:3129'
 curl() {
@@ -168,6 +267,11 @@ grep -Fq -- '--proxy http://127.0.0.1:3129' "${test_dir}/curl_invocation"
 fetch_update_url "$(github_raw_url)" "${test_dir}/curl_out"
 grep -Fq -- '--proxy http://127.0.0.1:3129' "${test_dir}/curl_invocation"
 grep -Fq 'https://raw.githubusercontent.com/xinian5216/warp-egress-manager/main/warp-3xui.sh' \
+    "${test_dir}/curl_invocation"
+# Release-tag raw URL is still a GitHub URL, so it must also go through the proxy.
+fetch_update_url "$(github_raw_url 'xinian5216/warp-egress-manager' warp-3xui.sh 'v1.4.1')" "${test_dir}/curl_out"
+grep -Fq -- '--proxy http://127.0.0.1:3129' "${test_dir}/curl_invocation"
+grep -Fq 'https://raw.githubusercontent.com/xinian5216/warp-egress-manager/v1.4.1/warp-3xui.sh' \
     "${test_dir}/curl_invocation"
 unset -f curl
 unset WARPM_GITHUB_PROXY || true

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 PROJECT_ID="warp-egress-manager"
 LEGACY_PROJECT_ID="warp-3xui-safe"
 PROJECT_NAME="WARP Egress Manager"
@@ -86,15 +86,16 @@ install 选项：
   --egress auto|ipv4|ipv6|dual
                           WARP 出口验收与 curl/Xray 地址族；auto 补齐单栈
   --license-file PATH     可选，从本地权限受控文件读取官方 WARP+ Key
-  --repo OWNER/REPO       GitHub 仓库，用于后续匿名自更新
+  --repo OWNER/REPO       GitHub 仓库，用于后续匿名自更新（默认取最新正式 Release）
   --github-proxy URL      仅用于访问 GitHub 的代理（http/https）
   --non-interactive       不询问，使用给定值/默认值
 
 self-update 选项：
   --file PATH             从本地脚本文件更新
   --url HTTPS_URL         从 URL 更新（GitHub URL 会走 GitHub Proxy）
-  --repo OWNER/REPO       从该公开仓库的 GitHub Raw 更新
-  --github                从默认公开仓库的 GitHub Raw 更新
+  --repo OWNER/REPO       从该公开仓库的最新正式 GitHub Release 更新
+  --github                从默认公开仓库的最新正式 GitHub Release 更新
+  --main                  从仓库 main 分支更新，仅用于测试/开发，不是默认稳定更新通道
   --github-proxy URL      仅用于访问 GitHub 的代理（http/https）
 
 安全保证：
@@ -149,12 +150,57 @@ validate_github_repo() {
         || die "仓库名必须是 OWNER/REPO。"
 }
 
+# 默认 ref 是 main，仅供 --main 显式开发通道使用。
+# 生产更新通道必须通过 releases/latest 得到正式 tag，不得使用本默认值。
 github_raw_url() {
     local repo="${1:-${UPDATE_REPO}}"
     local path="${2:-warp-3xui.sh}"
     local ref="${3:-main}"
     validate_github_repo "${repo}"
     printf 'https://raw.githubusercontent.com/%s/%s/%s' "${repo}" "${ref}" "${path}"
+}
+
+# 正式版本 tag 只允许 vMAJOR.MINOR.PATCH；拒绝 main、refs/...、../.. 等 path injection。
+validate_release_tag() {
+    [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || die "Release tag 格式不合法：$1"
+}
+
+# 版本号比较：输出 -1 / 0 / 1（当前 < 目标 / 相等 / 当前 > 目标）。
+compare_versions() {
+    local current="$1" target="$2"
+    local -a a b
+    IFS='.' read -r -a a <<<"${current}"
+    IFS='.' read -r -a b <<<"${target}"
+    local i
+    for i in 0 1 2; do
+        if (( 10#${a[i]:-0} < 10#${b[i]:-0} )); then printf '%s' '-1'; return 0; fi
+        if (( 10#${a[i]:-0} > 10#${b[i]:-0} )); then printf '%s' '1'; return 0; fi
+    done
+    printf '%s' '0'
+}
+
+# 解析 GitHub releases/latest，输出正式 tag（不含 v 前缀由调用方处理）。
+# 只使用 jq（安装流程保证存在），失败一律 fail closed，绝不回退 main。
+resolve_latest_release_tag() {
+    local repo="$1" api_url payload tag draft prerelease
+    validate_github_repo "${repo}"
+    api_url="https://api.github.com/repos/${repo}/releases/latest"
+    if ! payload="$(github_curl -fsSL --max-time 20 "${api_url}")"; then
+        die "查询 GitHub Release 失败（${api_url}）。未执行更新。"
+    fi
+    [[ -n "${payload}" ]] || die "GitHub Release 响应为空。未执行更新。"
+    if ! printf '%s' "${payload}" | jq -e . >/dev/null 2>&1; then
+        die "GitHub Release 响应不是合法 JSON。未执行更新。"
+    fi
+    draft="$(printf '%s' "${payload}" | jq -r '.draft // false')"
+    prerelease="$(printf '%s' "${payload}" | jq -r '.prerelease // false')"
+    tag="$(printf '%s' "${payload}" | jq -r '.tag_name // empty')"
+    [[ "${draft}" == "false" ]] || die "最新 Release 仍是 draft，不作为稳定更新通道。未执行更新。"
+    [[ "${prerelease}" == "false" ]] || die "最新 Release 是 prerelease，不作为稳定更新通道。未执行更新。"
+    [[ -n "${tag}" ]] || die "未找到可用的正式 GitHub Release，未执行更新。"
+    validate_release_tag "${tag}"
+    printf '%s' "${tag}"
 }
 
 migrate_tunnel_protocol() {
@@ -951,6 +997,7 @@ self_update() {
     require_root
     load_config
     local source_type="" source_value="" temp_file="" work_dir new_version
+    local use_main=0 expected_tag="" release_tag=""
     while (($#)); do
         case "$1" in
             --file|--url)
@@ -961,11 +1008,15 @@ self_update() {
                 [[ $# -ge 2 ]] || die "--repo 缺少值"
                 validate_github_repo "$2"
                 UPDATE_REPO="$2"
-                source_type="url"
-                source_value="$(github_raw_url "$2")"
+                source_type="release"
                 shift 2
                 ;;
             --github)
+                source_type="release"
+                shift
+                ;;
+            --main)
+                use_main=1
                 source_type="url"
                 source_value="$(github_raw_url)"
                 shift
@@ -976,17 +1027,28 @@ self_update() {
                 shift 2
                 ;;
             --cloudflare)
-                warn "Cloudflare Worker 更新通道已退役，改为从公开 GitHub Raw 更新。"
-                source_type="url"
-                source_value="$(github_raw_url)"
+                warn "Cloudflare Worker 更新通道已退役，改为从 GitHub 正式 Release 更新。"
+                source_type="release"
                 shift
                 ;;
             *) die "未知 self-update 选项：$1" ;;
         esac
     done
     if [[ -z "${source_type}" ]]; then
+        # 默认通道：最新正式 GitHub Release。绝不回退 main。
+        source_type="release"
+    fi
+    if [[ "${source_type}" == "release" ]]; then
+        release_tag="$(resolve_latest_release_tag "${UPDATE_REPO}")"
+        expected_tag="${release_tag#v}"
         source_type="url"
-        source_value="$(github_raw_url)"
+        source_value="$(github_raw_url "${UPDATE_REPO}" warp-3xui.sh "${release_tag}")"
+    elif (( use_main == 0 )) && [[ "${source_type}" == "url" ]]; then
+        # --url 由维护者显式给出，不再推断；此处仅防御默认值被改回 main。
+        :
+    fi
+    if (( use_main == 1 )); then
+        warn "正在从 ${UPDATE_REPO} 的 main 分支更新；main 是开发基线，仅用于测试，不是稳定更新通道。"
     fi
 
     work_dir="$(dirname -- "${MANAGER_PATH}")"
@@ -1004,6 +1066,23 @@ self_update() {
     esac
     validate_update_payload "${temp_file}"
     new_version="$(version_from_file "${temp_file}")"
+    if [[ -n "${expected_tag}" ]]; then
+        # Release 完整性门禁：tag 与脚本版本必须一致。
+        [[ "${new_version}" == "${expected_tag}" ]] \
+            || die "Release ${release_tag} 与脚本版本 ${new_version} 不一致，拒绝安装。"
+        local version_relation
+        version_relation="$(compare_versions "${SCRIPT_VERSION}" "${new_version}")"
+        case "${version_relation}" in
+            0)
+                log "当前已经是最新正式版本 ${new_version}。"
+                temp_file=""
+                return 0
+                ;;
+            1)
+                die "当前版本 ${SCRIPT_VERSION} 高于最新正式版本 ${new_version}；未执行降级。"
+                ;;
+        esac
+    fi
     chmod 755 "${temp_file}"
 
     if [[ -e "${MANAGER_PATH}" ]]; then

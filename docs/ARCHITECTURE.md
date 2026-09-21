@@ -41,5 +41,9 @@ WARP trace、Google 和 YouTube 验收仍直连。
 - `mode proxy` 失败时不会执行 `connect`。
 - 首次安装在验收前出错，会调用 `warp-cli disconnect`。
 - 更新管理脚本前运行 `bash -n` 并验证项目标识；新文件先写入暂存再 `mv` 替换，旧版本保留为 `.bak`。
+- `self-update` 默认走 `releases/latest`：解析出正式 tag（`vMAJOR.MINOR.PATCH`）后从对应
+  tag 下载；draft/prerelease、JSON 非法、tag 为空或格式不合法一律失败退出，不回退 `main`。
+- 下载脚本的 `SCRIPT_VERSION` 必须与 Release tag 一致；与最新正式版本相同时不重复覆盖，
+  当前版本更高时拒绝降级。`--main` 是显式开发通道，不属于生产更新路径。
 - WARP 代理异常不会改变系统默认路由，原生 SSH 不依赖 WARP。
 - 官方软件源失败时不会改走第三方镜像。

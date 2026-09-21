@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.1 - 2026-09-20
+
+### Changed
+
+- `self-update` 默认改为查询该仓库最新的**正式 GitHub Release**（`releases/latest`），并从对应的不可变 tag 下载脚本。`main` 不再是生产更新通道。
+- `--repo OWNER/REPO` 与 `--github` 现在与默认行为一致：都从最新正式 Release 更新，不再读取 `main`。
+
+### Added
+
+- 显式开发通道 `self-update --main`：只有显式传入时才从 `main` 分支下载，并在 usage 中标注仅用于测试/开发。
+- Release 完整性门禁：下载脚本的 `SCRIPT_VERSION` 必须与 Release tag 一致，否则拒绝安装。
+- 版本比较：与最新正式版本相同时提示“已是最新”并不重复覆盖；当前版本高于最新正式版本时拒绝自动降级。
+- `tag_name` 严格校验为 `vMAJOR.MINOR.PATCH`，拒绝 `main`、`refs/heads/main`、`../../xxx` 等可能造成 URL path injection 的写法。
+
+### Security
+
+- `releases/latest` 解析失败、返回 draft/prerelease、JSON 不合法、tag 为空或格式不合法时，一律明确退出（fail closed），绝不回退到 `main`。
+
 ## 1.4.0 - 2026-09-20
 
 ### Removed / Deprecated
